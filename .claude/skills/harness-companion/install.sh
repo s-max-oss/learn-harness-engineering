@@ -39,15 +39,27 @@ else
   echo "  Done."
 fi
 
+# --- Step 1.5: Stamp install time --------------------------------------------
+echo "[1.5/4] Stamping install time..."
+INSTALLED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)"
+if command -v jq >/dev/null 2>&1; then
+  jq --arg ts "$INSTALLED_AT" '.installed_at = $ts' \
+    "$TARGET/install-receipt.json" > "$TARGET/install-receipt.tmp.json" \
+    && mv "$TARGET/install-receipt.tmp.json" "$TARGET/install-receipt.json"
+  echo "  installed_at: $INSTALLED_AT"
+else
+  echo "  (jq missing — skipping installed_at stamp)"
+fi
+
 # --- Step 2: Make scripts executable -----------------------------------------
-echo "[2/3] Making scripts executable..."
+echo "[2/4] Making scripts executable..."
 chmod +x "$TARGET/scripts/"*.sh 2>/dev/null || true
 chmod +x "$TARGET/scripts/hooks/"*.sh 2>/dev/null || true
 chmod +x "$TARGET/templates/"*.sh 2>/dev/null || true
 echo "  Done."
 
 # --- Step 3: Register hooks in settings.json ---------------------------------
-echo "[3/3] Registering hooks in ~/.claude/settings.json..."
+echo "[3/4] Registering hooks in ~/.claude/settings.json..."
 
 SETTINGS_FILE="$HOME/.claude/settings.json"
 
@@ -96,7 +108,8 @@ fi
 
 echo ""
 
-# --- Verify ------------------------------------------------------------------
+# --- Step 4: Verify ----------------------------------------------------------
+echo "[4/4] Verifying installation..."
 echo "=== Install Complete ==="
 echo ""
 echo "Verification:"

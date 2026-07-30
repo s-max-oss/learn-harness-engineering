@@ -20,6 +20,19 @@ echo "== harness-feature.sh =="
 if ! command -v jq >/dev/null 2>&1; then
   echo "  ⏭  harness-feature.sh requires jq (not installed); all tests skipped"
   HT_SKIPPED=$((HT_SKIPPED + 1))
+
+# --- legacy string + modern complete run → passing (v1.1.2) -----------------
+# Legacy v0 string evidence is ignored; only the latest structured run matters.
+FIX="$HERE/fixtures/legacy-with-modern"
+TMP="$(ht_mktmp feat-legacy-with-modern)"
+cp -a "$FIX"/* "$TMP/" 2>/dev/null || cp -r "$FIX"/* "$TMP/"
+cp -a "$FIX/.harness" "$TMP/" 2>/dev/null || true
+OUT="$(cd "$TMP" && "$SCRIPT" status . legacy-001 passing 2>&1)"
+RUN_EXIT=$?
+test "feature status: legacy string + modern complete run → passing (exit 0)" "0" "$RUN_EXIT"
+FINAL_STATUS="$(cd "$TMP" && jq -r '.features[0].status' feature_list.json 2>/dev/null)"
+test "feature status: legacy string + modern — status flips to passing"      "passing" "$FINAL_STATUS"
+ht_rmrf "$TMP"
   ht_summary
   exit 0
 fi
@@ -58,20 +71,6 @@ test "feature status: passing-with-no-evidence is REJECTED" "yes" "$ACT"
 # Confirm status was NOT changed.
 FINAL_STATUS="$(cd "$TMP" && jq -r '.features[0].status' feature_list.json 2>/dev/null)"
 test "feature status: passing-with-no-evidence — status stays in_progress" \
-     "in_progress" "$FINAL_STATUS"
-ht_rmrf "$TMP"
-
-# --- passing-with-string-evidence must be REJECTED (v1.1) --------------------
-FIX="$HERE/fixtures/v0-string-evidence"
-TMP="$(ht_mktmp feat-string-evidence)"
-cp -a "$FIX"/* "$TMP/" 2>/dev/null || cp -r "$FIX"/* "$TMP/"
-OUT="$(cd "$TMP" && "$SCRIPT" status . legacy-001 passing 2>&1)"
-RUN_EXIT=$?
-if [ "$RUN_EXIT" != "0" ] && printf '%s' "$OUT" | grep -qi "string"; then ACT="yes"; else ACT="no"; fi
-test "feature status: string (v0-legacy) evidence is REJECTED" "yes" "$ACT"
-
-FINAL_STATUS="$(cd "$TMP" && jq -r '.features[0].status' feature_list.json 2>/dev/null)"
-test "feature status: string evidence — status stays in_progress" \
      "in_progress" "$FINAL_STATUS"
 ht_rmrf "$TMP"
 
@@ -115,6 +114,20 @@ FEAT_EXIT=$?
 test "feature agreement: harness-feature.sh status passing exits 0" "0" "$FEAT_EXIT"
 FEAT_STATUS="$(jq -r '.features[0].status' "$TMP/feature_list.json")"
 test "feature agreement: harness-feature.sh sets status=passing" "passing" "$FEAT_STATUS"
+ht_rmrf "$TMP"
+
+
+# --- legacy string + modern complete run → passing (v1.1.2) -----------------
+# Legacy v0 string evidence is ignored; only the latest structured run matters.
+FIX="$HERE/fixtures/legacy-with-modern"
+TMP="$(ht_mktmp feat-legacy-with-modern)"
+cp -a "$FIX"/* "$TMP/" 2>/dev/null || cp -r "$FIX"/* "$TMP/"
+cp -a "$FIX/.harness" "$TMP/" 2>/dev/null || true
+OUT="$(cd "$TMP" && "$SCRIPT" status . legacy-001 passing 2>&1)"
+RUN_EXIT=$?
+test "feature status: legacy string + modern complete run → passing (exit 0)" "0" "$RUN_EXIT"
+FINAL_STATUS="$(cd "$TMP" && jq -r '.features[0].status' feature_list.json 2>/dev/null)"
+test "feature status: legacy string + modern — status flips to passing"      "passing" "$FINAL_STATUS"
 ht_rmrf "$TMP"
 
 ht_summary

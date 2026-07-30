@@ -198,6 +198,45 @@ treated as legacy singletons: only the very last record counts for passing
 eligibility. Re-run `/harness:verify --write` to produce `run_id`-tagged
 evidence.
 
+## v1.1.1 → v1.1.2: Boundary fixes
+
+v1.1.2 fixes edge cases in run-based passing eligibility. No new features.
+
+### Latest run detected by array position, not max(run_id)
+
+**v1.1.1**: `is_eligible_for_passing` used jq's `max(run_id)` to find the latest
+run. This picks the lexicographically largest run_id string, which fails when
+two runs share the same timestamp prefix but the earlier run got a higher PID.
+
+**v1.1.2**: The latest run is the `run_id` of the **last structured evidence
+record** in the array. Since evidence is append-only, array position IS
+chronological order. This correctly handles same-second consecutive verifies
+where PID/RANDOM ordering doesn't match temporal ordering.
+
+### Legacy v0 string evidence no longer blocks passing
+
+**v1.1.1**: Any string evidence record (v0 format) immediately incremented the
+error counter, preventing the feature from ever reaching `passing`.
+
+**v1.1.2**: String evidence records are **noted to stderr but do not increment
+the error counter**. Only the latest structured run matters for passing
+eligibility. Historic string records are harmless — the audit script can still
+flag them for cleanup.
+
+### install-receipt.json `installed_at` is real UTC
+
+**v1.1.1**: `installed_at` was a hardcoded timestamp (`2026-07-30T23:00:00Z`)
+in the committed `install-receipt.json`.
+
+**v1.1.2**: `install.sh` generates `installed_at` at install time via
+`date -u +%Y-%m-%dT%H:%M:%SZ` and stamps it into the installed receipt with jq.
+
+### Migration
+
+No manual steps required. Features blocked from `passing` by v0 string evidence
+will now pass if a complete modern run exists. Re-run `/harness:verify --write`
+if you need new `run_id`-tagged evidence.
+
 ## Soft improvements
 
 ### 5. Hooks no longer crash

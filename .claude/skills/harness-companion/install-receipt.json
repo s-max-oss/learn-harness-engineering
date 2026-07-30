@@ -1,14 +1,14 @@
 {
   "skill": "harness-companion",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "schema_version": "1.1.0",
   "source": {
     "repository": "harness-engineering",
     "branch": "feat/harness-course",
-    "commit": "42feaea96c5cfba77e1ac88b0e411ff9f3bcdb44",
-    "commit_short": "42feaea96c5c"
+    "commit": "282dc8d363d2a94cdf70e0470f067f208f22ce6d",
+    "commit_short": "282dc8d363d2"
   },
-  "installed_at": "2026-07-30T23:00:00Z",
+  "installed_at": "2026-07-31T00:00:00Z",
   "installed_to": "~/.claude/skills/harness-companion",
   "integrity": {
     "algorithm": "sha256",
@@ -22,7 +22,7 @@
       "scripts/_lib/harness_config.sh": "9b1b5c5c6f55ee23f26e00075c5d38b144862780bc801d0a12db047ef7f25dfe",
       "scripts/_lib/atomic_write.sh": "76d2eec56a749f1fef8dd86d97d830d5743ca183c118e58539d5b5e64b05e14d",
       "scripts/_lib/baseline.sh": "84f3443889d07451df0272179a64c673b7af276d5a0c5df6a2dad2c8be5af1b8",
-      "scripts/_lib/passing.sh": "252163c5e5d21074260b51d7eeab79b62801b57fd24ae7bada57d695432aa604",
+      "scripts/_lib/passing.sh": "12cbef094fca255698708d74763933198a71f5645e4d4037aa5ec805cdacfa87",
       "scripts/hooks/session-start.sh": "c9b471cc531a7c2777ab27a14468d97dc0f3b8462ea0e577decfd6f15acb3a9d",
       "scripts/hooks/stop-handoff.sh": "4959c50780d62670fe271201bdbaaf4e47820c4a87d692f6323d2feddc1ceb57"
     }

@@ -1,0 +1,58 @@
+{
+  "project": "legacy-with-modern",
+  "last_updated": "2026-07-31",
+  "features": [
+    {
+      "id": "legacy-001",
+      "priority": 1,
+      "area": "core",
+      "title": "Legacy v0 feature with modern complete evidence after string",
+      "user_visible_behavior": "Demo",
+      "status": "in_progress",
+      "verification": ["typecheck", "build", "test"],
+      "evidence": [
+        "npm test ran successfully at commit abc123",
+        {
+          "id": "typecheck",
+          "command": ["node", "-e", "process.exit(0)"],
+          "exit_code": 0,
+          "started_at": "2026-07-31T10:00:00Z",
+          "duration_ms": 5000,
+          "commit": "abc123def456",
+          "working_tree_state": "clean",
+          "summary": "command typecheck exited 0",
+          "log_artifact": "/tmp/log-typecheck",
+          "log_sha256": "abc111",
+          "run_id": "20260731T100000Z-33333-00001"
+        },
+        {
+          "id": "build",
+          "command": ["node", "-e", "console.log('build ok')"],
+          "exit_code": 0,
+          "started_at": "2026-07-31T10:00:01Z",
+          "duration_ms": 8000,
+          "commit": "abc123def456",
+          "working_tree_state": "clean",
+          "summary": "command build exited 0",
+          "log_artifact": "/tmp/log-build",
+          "log_sha256": "abc222",
+          "run_id": "20260731T100000Z-33333-00001"
+        },
+        {
+          "id": "test",
+          "command": ["node", "-e", "console.log('test ok')"],
+          "exit_code": 0,
+          "started_at": "2026-07-31T10:00:02Z",
+          "duration_ms": 10000,
+          "commit": "abc123def456",
+          "working_tree_state": "clean",
+          "summary": "command test exited 0",
+          "log_artifact": "/tmp/log-test",
+          "log_sha256": "abc333",
+          "run_id": "20260731T100000Z-33333-00001"
+        }
+      ],
+      "notes": ""
+    }
+  ]
+}

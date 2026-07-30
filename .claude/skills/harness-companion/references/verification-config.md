@@ -108,8 +108,8 @@ Each verified command writes one structured record into the feature's
 }
 ```
 
-v1.1.1 passing validation (latest-run-only):
-1. Evidence objects (string evidence from v0 is rejected)
+v1.1.2 passing validation (latest-run-only):
+1. Evidence objects (string evidence from v0 is ignored — only structured records count toward passing)
 2. Only records from the **latest `run_id`** are considered
 3. All considered records have `exit_code: 0`
 4. Considered records cover every `required_for_passing != false` command

@@ -1,9 +1,10 @@
 #!/bin/bash
 # passing.sh — Run-based passing eligibility for evidence records
 #
-# v1.1.1: Passing is determined by the LATEST COMPLETE RUN only. Evidence records
-# from different runs cannot be cobbled together. Each run is identified by a
-# unique run_id (timestamp-PID-RANDOM), injected by verify.sh at invocation time.
+# v1.1.2: Passing is determined by the LATEST COMPLETE RUN only. The latest run
+# is the last structured evidence record in the array (append-only). Evidence
+# from different runs cannot be cobbled together. Legacy v0 string evidence is
+# ignored (noted but does not block passing).
 #
 # Usage:
 #   source passing.sh
@@ -12,9 +13,9 @@
 #
 # is_eligible_for_passing returns 0 if the feature is eligible for "passing"
 # status, 1 with an explanation on stderr otherwise. Rules:
-#   1. Evidence is non-empty and structured (objects, not v0 strings)
-#   2. Find the latest run_id across all evidence records
-#   3. Only records sharing that run_id are considered
+#   1. Evidence is non-empty; legacy v0 strings are noted but do not block
+#   2. The latest run is the last structured evidence record (by array position)
+#   3. Only records sharing that run's run_id are considered
 #   4. All considered records must have exit_code == 0
 #   5. Considered records must cover all required commands (required_for_passing != false)
 #   6. Latest run's commit must equal current HEAD (git repos only)
@@ -50,18 +51,16 @@ is_eligible_for_passing() {
   has_strings="$(jq -r --arg fid "$fid" \
     '[.features[] | select(.id == $fid) | .evidence[] | select(type == "string")] | length' "$fl" 2>/dev/null || echo 0)"
   if [ "$has_strings" != "0" ]; then
-    echo "Error: feature '$fid' has $has_strings string evidence record(s) (legacy v0 format)." >&2
-    echo "Re-run /harness:verify to produce structured evidence records." >&2
-    errs=$((errs + 1))
+    echo "Note: feature '$fid' has $has_strings legacy v0 string evidence record(s) — ignored for passing eligibility." >&2
   fi
 
-  # --- 2: Find the latest run_id -------------------------------------------------
-  # Legacy records (no run_id) map to "__legacy__"; treated as a singleton — only
-  # the very last record is checked. Modern records carry a timestamp-PID-RANDOM
-  # run_id; string max() picks the lexicographically latest (newest timestamp).
+  # --- 2: Find the latest run ---------------------------------------------------
+  # The last structured evidence record (by array position) defines the latest run.
+  # Evidence is append-only, so array order IS chronological order. Legacy records
+  # (no structured objects) fall back to "__legacy__"; only the last record matters.
   local latest_run
   latest_run="$(jq -r --arg fid "$fid" '
-    [.features[] | select(.id == $fid) | .evidence[]?.run_id // "__legacy__"] | max
+    [.features[] | select(.id == $fid) | .evidence[] | select(type == "object")] | last.run_id // "__legacy__"
   ' "$fl" 2>/dev/null || echo "__legacy__")"
 
   # --- 3-4: Only latest-run records; all must have exit_code == 0 ---------------
@@ -73,7 +72,7 @@ is_eligible_for_passing() {
       "$fl" 2>/dev/null || echo "0")"
   else
     failed="$(jq -r --arg fid "$fid" --arg run "$latest_run" \
-      '[.features[] | select(.id == $fid) | .evidence[]? | select(.run_id == $run and .exit_code != 0)] | length' \
+      '[.features[] | select(.id == $fid) | .evidence[] | select(type == "object") | select(.run_id == $run and .exit_code != 0)] | length' \
       "$fl" 2>/dev/null || echo 0)"
   fi
   if [ "$failed" != "0" ]; then
@@ -93,7 +92,7 @@ is_eligible_for_passing() {
         "$fl" 2>/dev/null || true)"
     else
       covered_ids="$(jq -r --arg fid "$fid" --arg run "$latest_run" \
-        '[.features[] | select(.id == $fid) | .evidence[]? | select(.run_id == $run) | .id // "?"] | sort | unique | .[]' \
+        '[.features[] | select(.id == $fid) | .evidence[] | select(type == "object") | select(.run_id == $run) | .id // "?"] | sort | unique | .[]' \
         "$fl" 2>/dev/null || true)"
     fi
     missing="$(comm -23 <(printf '%s' "$required_ids") <(printf '%s' "$covered_ids") 2>/dev/null || true)"
@@ -112,7 +111,7 @@ is_eligible_for_passing() {
         '.features[] | select(.id == $fid) | (.evidence[-1].commit // "null")' "$fl" 2>/dev/null || echo "null")"
     else
       run_commit="$(jq -r --arg fid "$fid" --arg run "$latest_run" \
-        '.features[] | select(.id == $fid) | .evidence[]? | select(.run_id == $run) | .commit // "null"' \
+        '.features[] | select(.id == $fid) | .evidence[] | select(type == "object") | select(.run_id == $run) | .commit // "null"' \
         "$fl" 2>/dev/null | head -1 || echo "null")"
     fi
     head_commit="$(git rev-parse --short=12 HEAD 2>/dev/null || echo "null")"

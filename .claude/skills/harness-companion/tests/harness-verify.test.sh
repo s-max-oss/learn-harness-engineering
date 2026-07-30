@@ -392,4 +392,22 @@ if printf '%s' "$OUT" | grep -q "stale"; then ACT="yes"; else ACT="no"; fi
 test "verify: old-commit — error mentions stale evidence" "yes" "$ACT"
 ht_rmrf "$TMP"
 
+# --- Scenario 10: same-second runs — last-record beats max(run_id) -----------
+# Discriminative test: two runs share the same timestamp prefix, but the earlier
+# run (A) has a lexicographically larger PID suffix. max(run_id) would pick
+# Run A (99999 > 11111) and wrongly find it complete. The correct approach
+# (last structured record) picks Run B, which is incomplete.
+FIX="$HERE/fixtures/same-second-runs"
+TMP="$(ht_mktmp verify-same-second)"
+cp -a "$FIX"/* "$TMP/" 2>/dev/null || cp -r "$FIX"/* "$TMP/"
+cp -a "$FIX/.harness" "$TMP/" 2>/dev/null || true
+OUT="$(cd "$TMP" && "$SKILL_DIR/scripts/harness-feature.sh" status . same-second-001 passing 2>&1)"
+RUN_EXIT=$?
+test "verify: same-second — feature status passing is REJECTED (exit != 0)" "1"      "$(if [ "$RUN_EXIT" != "0" ]; then echo 1; else echo 0; fi)"
+if printf '%s' "$OUT" | grep -q "missing"; then ACT="yes"; else ACT="no"; fi
+test "verify: same-second — error mentions missing commands" "yes" "$ACT"
+FINAL_STATUS="$(cd "$TMP" && jq -r '.features[0].status' feature_list.json 2>/dev/null)"
+test "verify: same-second — status stays in_progress" "in_progress" "$FINAL_STATUS"
+ht_rmrf "$TMP"
+
 ht_summary
