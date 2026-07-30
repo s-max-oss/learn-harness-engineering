@@ -105,12 +105,21 @@ if ! feature_exists "$FEATURE_ID"; then
   exit 2
 fi
 
-# Stale-evidence check before doing anything destructive.
-if ev_is_stale "$FEATURE_ID" 2>/dev/null | grep -q true; then
-  echo "Evidence for '$FEATURE_ID' is STALE (HEAD moved + working tree changed)." >&2
-  echo "Re-run verify after a clean state." >&2
-  exit 3
-fi
+# Stale-evidence policy (v1.1):
+#   - Stale evidence does NOT block re-running verify against the current HEAD.
+#     A stale record means the prior evidence describes a state that no longer
+#     matches HEAD; the user must re-run to refresh it.
+#   - Stale evidence DOES block relying on the old record as authoritative: if
+#     we would otherwise promote the feature to `passing` purely because the
+#     last evidence record looks good, but that record is stale, we must refuse
+#     and require a fresh verify run.
+#
+# Implementation: we still let the run proceed. After the run, if the new
+# evidence is itself stale (i.e. ev_is_stale still says true post-run — which
+# only happens when no commands actually ran), then refuse to mark passing.
+#
+# This replaces the prior behavior of exit 3 on pre-check, which prevented
+# users from refreshing stale evidence.
 
 LOG_DIR="$PROJECT_DIR/.harness/logs"
 mkdir -p "$LOG_DIR" 2>/dev/null || true
@@ -250,6 +259,7 @@ while IFS= read -r cmd_id; do
   SUMMARY="$(printf 'command %s exited %s' "$cmd_id" "$EXIT_CODE")"
 
   RECORD="$(jq -n \
+    --arg id "$cmd_id" \
     --argjson command "$(printf '%s' "$CMD_JSON" | jq -c '.command')" \
     --argjson exit_code "$EXIT_CODE" \
     --arg started_at "$START_TS" \
@@ -260,6 +270,7 @@ while IFS= read -r cmd_id; do
     --arg log_artifact "$LOG_FILE" \
     --arg log_sha256 "$LOG_SHA" \
     '{
+      id: $id,
       command: $command,
       exit_code: $exit_code,
       started_at: $started_at,
@@ -289,15 +300,22 @@ _write_evidence_and_status() {
     return 1
   fi
   if [ "${#EVIDENCE_RECORDS[@]}" -eq 0 ]; then return 0; fi
-  local COMBINED TODAY
+  local COMBINED TODAY new_content
   COMBINED="$(printf '%s\n' "${EVIDENCE_RECORDS[@]}" | jq -s '.')"
   TODAY="$(date +%Y-%m-%d)"
-  jq --arg fid "$FEATURE_ID" --argjson recs "$COMBINED" --arg today "$TODAY" \
-     --arg status "$new_status" \
-     '(.features[] | select(.id == $fid) | .evidence) += $recs
-      | (.features[] | select(.id == $fid) | .status) = $status
-      | .last_updated = $today' \
-     "$FL" > "$FL.tmp" && mv -f "$FL.tmp" "$FL"
+  if ! new_content="$(jq --arg fid "$FEATURE_ID" --argjson recs "$COMBINED" --arg today "$TODAY" \
+       --arg status "$new_status" \
+       '(.features[] | select(.id == $fid) | .evidence) += $recs
+        | (.features[] | select(.id == $fid) | .status) = $status
+        | .last_updated = $today' \
+       "$FL")"; then
+    echo "verify: failed to render updated JSON" >&2
+    return 1
+  fi
+  if ! atomic_write_json "$FL" "$new_content"; then
+    echo "verify: atomic_write_json failed for $FL" >&2
+    return 1
+  fi
 }
 
 # Decision: is the feature eligible for `passing`?
@@ -317,6 +335,22 @@ if [ "$ANY_FAILED" = "true" ]; then
   exit 1
 fi
 
+# Stale-evidence guard (v1.1). We let the run proceed (commands ran above and
+# produced fresh evidence). At the end, if the LATEST evidence record is still
+# stale (i.e. no command actually ran to refresh the evidence — e.g. every
+# command was not_applicable AND there is no git repo to give us a HEAD), then
+# we refuse to mark passing on stale grounds. Note: in a git repo, if any
+# command ran, its evidence.commit == current HEAD, so ev_is_stale returns
+# false here. We only block when nothing refreshed the record.
+if [ "${#EVIDENCE_RECORDS[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
+  if ev_is_stale "$FEATURE_ID" 2>/dev/null | grep -q true; then
+    echo "Evidence for '$FEATURE_ID' is STALE and no command ran to refresh it." >&2
+    echo "Either run verify in a git repo (so HEAD anchors evidence.commit), or" >&2
+    echo "mark the feature 'unverified' with --override if the old record still applies." >&2
+    exit 3
+  fi
+fi
+
 # All required commands passed (or were not_applicable).
 if [ "$WRITE" = "true" ]; then
   if command -v jq >/dev/null 2>&1; then
@@ -324,11 +358,12 @@ if [ "$WRITE" = "true" ]; then
     if [ "${#EVIDENCE_RECORDS[@]}" -gt 0 ]; then
       COMBINED="$(printf '%s\n' "${EVIDENCE_RECORDS[@]}" | jq -s '.')"
       TODAY="$(date +%Y-%m-%d)"
-      jq --arg fid "$FEATURE_ID" --argjson recs "$COMBINED" --arg today "$TODAY" \
+      new_content="$(jq --arg fid "$FEATURE_ID" --argjson recs "$COMBINED" --arg today "$TODAY" \
          '(.features[] | select(.id == $fid) | .evidence) += $recs
           | (.features[] | select(.id == $fid) | .status) = "passing"
           | .last_updated = $today' \
-         "$FL" > "$FL.tmp" && mv -f "$FL.tmp" "$FL"
+         "$FL")" || { echo "verify: failed to render passing JSON" >&2; exit 1; }
+      atomic_write_json "$FL" "$new_content" || { echo "verify: atomic_write_json failed" >&2; exit 1; }
       echo "Result: PASSING. feature_list.json updated."
     else
       echo "Result: nothing to record (no commands ran; min_required_for_passing is empty)."

@@ -122,19 +122,25 @@ ev_append() {
     echo "evidence: jq required to append structured evidence" >&2
     return 2
   fi
+  # We need atomic_write_json. It's in the same dir; source if not already.
+  if ! command -v atomic_write_json >/dev/null 2>&1; then
+    # shellcheck source=atomic_write.sh
+    source "${BASH_SOURCE[0]%/*}/atomic_write.sh"
+  fi
   local today
   today="$(date +%Y-%m-%d)"
-  local tmp
-  tmp="$(mktemp "${fl}.tmp.XXXXXX")"
-  if ! jq --arg fid "$fid" --argjson rec "$record" --arg today "$today" \
+  local new_content
+  if ! new_content="$(jq --arg fid "$fid" --argjson rec "$record" --arg today "$today" \
        '(.features[] | select(.id == $fid) | .evidence) += [$rec]
         | .last_updated = $today' \
-       "$fl" > "$tmp"; then
-    rm -f "$tmp"
-    echo "evidence: failed to rewrite feature_list.json" >&2
+       "$fl")"; then
+    echo "evidence: failed to render feature_list.json" >&2
     return 3
   fi
-  mv -f "$tmp" "$fl"
+  if ! atomic_write_json "$fl" "$new_content"; then
+    echo "evidence: atomic_write_json failed for $fl" >&2
+    return 4
+  fi
 }
 
 # Determine if the most recent evidence record for a feature is stale.

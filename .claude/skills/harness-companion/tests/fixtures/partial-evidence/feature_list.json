@@ -1,0 +1,30 @@
+{
+  "project": "partial-evidence",
+  "last_updated": "2026-07-30",
+  "features": [
+    {
+      "id": "partial-001",
+      "priority": 1,
+      "area": "core",
+      "title": "Partial evidence — missing required command coverage",
+      "user_visible_behavior": "Feature where evidence only covers some commands",
+      "status": "in_progress",
+      "verification": ["npm run typecheck", "npm run build", "npm test"],
+      "evidence": [
+        {
+          "id": "typecheck",
+          "command": ["npx", "tsc", "--noEmit"],
+          "exit_code": 0,
+          "started_at": "2026-07-30T10:00:00Z",
+          "duration_ms": 5000,
+          "commit": "abc123def456",
+          "working_tree_state": "clean",
+          "summary": "command typecheck exited 0",
+          "log_artifact": "/tmp/log",
+          "log_sha256": "abc123"
+        }
+      ],
+      "notes": ""
+    }
+  ]
+}

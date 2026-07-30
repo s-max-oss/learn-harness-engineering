@@ -156,9 +156,12 @@ Handoff:     session-handoff.md ✓  clean-state-checklist.md ✓
      "command": ["npx", "tsc", "--noEmit"],
      "exit_code": 0,
      "started_at": "2026-07-27T10:00:00Z",
-     "duration_seconds": 12.4,
+     "duration_ms": 12400,
      "commit": "abc1234",
-     "log_hash": "sha256:…"
+     "working_tree_state": "clean",
+     "summary": "command typecheck exited 0",
+     "log_artifact": ".harness/logs/verify-typecheck-20260727T100000Z.log",
+     "log_sha256": "6dcd4ce23d88e…"
    }
    ```
 5. Append the records to the feature's `evidence[]`. **Dry-run by default**;
@@ -169,9 +172,9 @@ Handoff:     session-handoff.md ✓  clean-state-checklist.md ✓
    | Outcome | Exit code | Meaning |
    |---|---|---|
    | `passing` | 0 | Every required command passed; `--write` updated feature |
-   | `failed` | 1 | At least one required command failed; no mutation |
-   | `not_configured` | 2 | `.harness/config.json` missing or jq missing |
-   | `stale` | 3 | Passes but evidence refs a different commit than HEAD |
+   | `failed` | 1 | At least one required command failed; evidence written, status unchanged |
+   | `not_configured` | 2 | `.harness/config.json` missing, jq missing, or required tool missing |
+   | `stale` | 3 | No commands ran (all not_applicable) and prior evidence.commit ≠ HEAD |
 
 7. **Required `jq`** — verify exits 2 with a clear message if jq is missing.
    Do NOT silently fall back to a heuristic "looks like it worked" check.

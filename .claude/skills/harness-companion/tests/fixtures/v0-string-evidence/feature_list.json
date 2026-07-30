@@ -1,0 +1,19 @@
+{
+  "project": "v0-string-evidence",
+  "last_updated": "2026-07-30",
+  "features": [
+    {
+      "id": "legacy-001",
+      "priority": 1,
+      "area": "core",
+      "title": "Legacy v0 feature with string evidence",
+      "user_visible_behavior": "Demo",
+      "status": "in_progress",
+      "verification": ["npm test"],
+      "evidence": [
+        "npm test ran successfully at commit abc123"
+      ],
+      "notes": ""
+    }
+  ]
+}

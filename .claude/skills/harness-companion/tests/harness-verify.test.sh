@@ -52,20 +52,20 @@ ACT="$RUN_EXIT"
 test "verify: exits 2 (not_configured) when no .harness/config.json" "2" "$ACT"
 
 # --- Without jq: exits 2 with clear error ------------------------------------
-if [ "$HAS_JQ" -eq 0 ]; then
-  TMP="$(make_tmp_with_config node-with-packagejson config.json.node.example)"
-  run_capture "$SCRIPT" "f-001" "$TMP" --write
-  ACT="$RUN_EXIT"
-  test "verify: exits 2 when jq is missing" "2" "$ACT"
-  if printf '%s' "$OUT" | grep -qi "jq is required"; then ACT="yes"; else ACT="no"; fi
-  test "verify: prints 'jq is required' guidance when jq is missing" "yes" "$ACT"
-  ht_rmrf "$TMP"
-else
-  echo "  ⏭  verify: exits 2 when jq missing (skipped: jq installed)"
-  HT_SKIPPED=$((HT_SKIPPED + 1))
-  echo "  ⏭  verify: prints jq-required guidance (skipped: jq installed)"
-  HT_SKIPPED=$((HT_SKIPPED + 1))
-fi
+# Force-execute the missing-jq branch via PATH isolation even when jq is
+# installed on the host. Remove ALL jq-containing directories from PATH.
+TMP="$(make_tmp_with_config node-with-packagejson config.json.node.example)"
+PATH_NO_JQ="$PATH"
+for jq_path in $(which -a jq 2>/dev/null || true); do
+  JQ_DIR="$(dirname "$jq_path")"
+  PATH_NO_JQ="$(echo "$PATH_NO_JQ" | tr ':' '\n' | grep -v "^${JQ_DIR}$" | paste -sd: -)"
+done
+OUT="$(env -i PATH="$PATH_NO_JQ" HOME="$HOME" bash "$SCRIPT" "f-001" "$TMP" --write 2>&1)"
+ACT=$?
+test "verify: exits 2 when jq is missing" "2" "$ACT"
+if printf '%s' "$OUT" | grep -qi "jq is required"; then ACT="yes"; else ACT="no"; fi
+test "verify: prints 'jq is required' guidance when jq is missing" "yes" "$ACT"
+ht_rmrf "$TMP"
 
 # --- Without jq: never invokes npx tsc on python fixture ---------------------
 FIX="$HERE/fixtures/python-pyproject"
@@ -189,26 +189,22 @@ ht_rmrf "$TMP"
 # ahead of jq on PATH. verify.sh must exit 2 with a clear error and NOT touch
 # feature_list.json.
 TMP="$(make_tmp_with_config node-with-packagejson config.json.node.example)"
-EMPTY_BIN="$(ht_mktmp empty-bin)"
-mkdir -p "$EMPTY_BIN"
-# Build a wrapped env: PATH excludes jq's location.
-PATH_WITHOUT_JQ="/usr/bin:/bin"
-# Find where jq lives so we can route around it.
-JQ_PATH="$(command -v jq 2>/dev/null || true)"
-if [ -n "$JQ_PATH" ]; then
-  JQ_DIR="$(dirname "$JQ_PATH")"
-  # Strip jq's dir from PATH.
-  PATH_WITHOUT_JQ="$(echo "$PATH" | tr ':' '\n' | grep -v "^${JQ_DIR}$" | paste -sd: -)"
-fi
+# Build a PATH that excludes ALL jq installations. We start from the current PATH
+# and remove every directory that contains a `jq` binary (winget, ~/bin, etc.).
+PATH_WITHOUT_JQ="$PATH"
+for jq_path in $(which -a jq 2>/dev/null || true); do
+  JQ_DIR="$(dirname "$jq_path")"
+  PATH_WITHOUT_JQ="$(echo "$PATH_WITHOUT_JQ" | tr ':' '\n' | grep -v "^${JQ_DIR}$" | paste -sd: -)"
+done
 BEFORE="$(cat "$TMP/feature_list.json")"
-run_capture env -i PATH="$PATH_WITHOUT_JQ" "$SCRIPT" "f-001" "$TMP" --write
+OUT="$(env -i PATH="$PATH_WITHOUT_JQ" HOME="$HOME" bash "$SCRIPT" "f-001" "$TMP" --write 2>&1)"
+RUN_EXIT=$?
 test "verify: missing-jq — exits 2 (not_configured)" "2" "$RUN_EXIT"
 test "verify: missing-jq — error message names jq" "1" \
      "$(printf '%s' "$OUT" | grep -c 'jq is required' || true)"
 test "verify: missing-jq — does NOT mutate feature_list.json" "$BEFORE" \
      "$(cat "$TMP/feature_list.json")"
 ht_rmrf "$TMP"
-ht_rmrf "$EMPTY_BIN"
 
 # --- Scenario 4: missing git (verify should still work) ------------------------
 # Real-world: a non-git project. verify must work — git is optional. evidence

@@ -85,7 +85,7 @@ hc_command_ids() {
     return 0
   fi
   if command -v jq >/dev/null 2>&1; then
-    jq -r '.verification.commands[]?.id // empty' "$cfg" 2>/dev/null
+    jq -r '.verification.commands[]?.id // empty' "$cfg" 2>/dev/null | tr -d '\r'
   fi
 }
 

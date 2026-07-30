@@ -98,15 +98,24 @@ Each verified command writes one structured record into the feature's
   "command": ["npx", "tsc", "--noEmit"],
   "exit_code": 0,
   "started_at": "2026-07-27T10:00:00Z",
-  "duration_seconds": 12.4,
+  "duration_ms": 12400,
   "commit": "abc1234",
-  "log_hash": "sha256:6dcd4ce2…"
+  "working_tree_state": "clean",
+  "summary": "command typecheck exited 0",
+  "log_artifact": ".harness/logs/verify-typecheck-20260727T100000Z.log",
+  "log_sha256": "6dcd4ce23d88e…"
 }
 ```
 
-This is what the audit script and feature state machine read. Don't write
+v1.1 passing validation requires:
+1. Evidence objects (string evidence from v0 is rejected)
+2. All records have `exit_code: 0`
+3. Latest `evidence[-1].commit` matches current HEAD
+4. Every `required_for_passing != false` command is represented
+
+The audit script and feature state machine read these records. Do not write
 hand-crafted string evidence — `harness-feature.sh` will refuse a `passing`
-transition that lacks an object in `evidence[]`.
+transition that lacks structured, complete, current evidence.
 
 ## Status outcomes
 
@@ -117,7 +126,7 @@ transition that lacks an object in `evidence[]`.
 | 0 | All required commands passed; `--write` flipped feature to `passing` |
 | 1 | A required command failed; nothing mutated |
 | 2 | Not configured (no `.harness/config.json` or `jq` missing) |
-| 3 | Stale — pass on a different commit than HEAD; re-run after pull |
+| 3 | Stale — no commands ran and previous evidence.commit ≠ HEAD; re-run verify |
 
 `--write` is required to mutate `feature_list.json`. Without it, the script
 runs everything, prints a "would-pass (dry-run)" summary, and exits without

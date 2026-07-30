@@ -66,7 +66,7 @@ match your real scripts.
 **v0**: Evidence was a list of free-text strings like `"2026-07-27: tests passed (42/42)"`.
 The state machine only checked that the list was non-empty.
 
-**v1**: Evidence is a list of JSON objects:
+**v1.1**: Evidence is a list of JSON objects:
 
 ```json
 {
@@ -74,15 +74,23 @@ The state machine only checked that the list was non-empty.
   "command": ["npx", "tsc", "--noEmit"],
   "exit_code": 0,
   "started_at": "2026-07-27T10:00:00Z",
-  "duration_seconds": 12.4,
+  "duration_ms": 12400,
   "commit": "abc1234",
-  "log_hash": "sha256:…"
+  "working_tree_state": "clean",
+  "summary": "command typecheck exited 0",
+  "log_artifact": ".harness/logs/verify-typecheck-20260727T100000Z.log",
+  "log_sha256": "6dcd4ce23d88e..."
 }
 ```
 
-Promoting a feature to `passing` now requires at least one such object. The
-script `harness-verify.sh` writes them; the state machine refuses to honor
-strings.
+Promoting a feature to `passing` now requires:
+1. **Structured evidence** — string records (v0 format) are rejected
+2. **All passing** — every evidence record must have `exit_code: 0`
+3. **Current HEAD** — the latest `evidence[-1].commit` must match the current HEAD
+4. **Full coverage** — evidence must cover every command where `required_for_passing != false`
+
+The script `harness-verify.sh` writes them; `harness-feature.sh` refuses to
+honor incomplete or stale evidence.
 
 **Migration**: Re-run `/harness:verify --write` for any feature whose
 `evidence[]` is empty or contains only strings. Old strings can stay in the
@@ -203,20 +211,14 @@ bash ~/.claude/skills/harness-companion/tests/run-all.sh
 Expected on a host WITH `jq`:
 
 ```
-Passed:   ~19
+Passed:   ~70
 Failed:   0
 Skipped:  0
-Deferred: ~2
+Deferred: 0
 ```
 
 Expected on a host WITHOUT `jq`:
-
-```
-Passed:   ~14
-Failed:   0
-Skipped:  ~8
-Deferred: ~2
-```
+— not supported: `jq` is mandatory. Install it first.
 
 If you see anything other than `Failed: 0`, file a bug — that means the new
 contract isn't holding somewhere we didn't anticipate.

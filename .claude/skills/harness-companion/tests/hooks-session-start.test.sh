@@ -46,16 +46,18 @@ if [ -f "$HOOK" ]; then
   test "session-start: emits hookSpecificOutput for harness project" "yes" "$ACT"
 fi
 
-# --- @known-bug: Windows-style path with backslash ----------------------------
+# --- Windows-style path resolved to real temp project --------------------------
 if [ -f "$HOOK" ]; then
-  # Simulate Windows-style JSON value with backslash (e.g., C:\Users\…).
-  INPUT='{"cwd":"C:\\Users\\someone\\My Project\\app"}'
+  TMP="$(ht_mktmp session-start-windows-cwd)"
+  # Clone the fixture into a temp dir to simulate a real project at an arbitrary path.
+  cp -a "$FIX"/* "$TMP/" 2>/dev/null || cp -r "$FIX"/* "$TMP/"
+  # Use the actual temp path (which may contain spaces/dashes/etc).
+  INPUT="{\"cwd\":\"$TMP\"}"
   run_capture_stdin "$HOOK" "$INPUT"
-  # The current regex parser will mishandle this; we just confirm it doesn't
-  # explode with non-zero exit AND that the response is still valid JSON.
-  if printf '%s' "$OUT" | grep -q '"continue":true'; then ACT="yes"; else ACT="no"; fi
-  test "@known-bug session-start: still emits continue:true on Windows-style cwd" \
+  if printf '%s' "$OUT" | grep -q "hookSpecificOutput"; then ACT="yes"; else ACT="no"; fi
+  test "session-start: detects harness files from temp project on real path" \
        "yes" "$ACT"
+  ht_rmrf "$TMP"
 fi
 
 ht_summary
