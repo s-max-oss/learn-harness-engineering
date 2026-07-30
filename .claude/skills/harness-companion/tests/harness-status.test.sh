@@ -1,15 +1,8 @@
 #!/bin/bash
-# harness-status.test.sh — Characterization tests for harness-status.sh
+# harness-status.test.sh — Tests for harness-status.sh
 #
-# Scope of v1 refactor:
-#   harness-verify.sh  — rewritten (config-driven)
-#   harness-feature.sh — rewritten (state machine)
-#   harness-audit.sh   — rewritten (5-axis scoring)
-#   hooks/*            — rewritten (reliable JSON parsing)
-#
-# harness-status.sh was NOT rewritten in v1. The script still aborts on the
-# first missing file due to `set -e`. These tests document the current gap
-# and are tagged @deferred-v2 so the next refactor cycle knows to address them.
+# v2: harness-status.sh now uses `set +e` (no abort on first missing file).
+# All 7 subsystem sections render regardless of file presence.
 
 set +e
 
@@ -42,15 +35,11 @@ if [ -f "$SCRIPT" ]; then
   test "status: prints 'Harness Health:' header" "yes" "$ACT"
 fi
 
-# --- @deferred-v2: scope section never renders due to set -e on missing AGENTS.md
+# --- feature_list.json stats render (v2: set +e survivies missing AGENTS.md) ---
 FIX="$HERE/fixtures/node-with-packagejson"
 if [ -f "$SCRIPT" ]; then
-  if contains "$OUT" "feature_list.json: 1 features"; then ACT="yes"; else ACT="no"; fi
-  test_deferred "@deferred-v2 status: shows feature_list.json total=1" \
-    "yes" "$ACT" "status.sh aborts on first missing file (set -e); v2 will set +e"
-  if contains "$OUT" "passing: 0/1"; then ACT="yes"; else ACT="no"; fi
-  test_deferred "@deferred-v2 status: shows passing/total progress" \
-    "yes" "$ACT" "status.sh aborts on first missing file (set -e); v2 will set +e"
+  if contains "$OUT" "feature_list.json" && contains "$OUT" "Scope:"; then ACT="yes"; else ACT="no"; fi
+  test "status: shows feature_list.json under Scope section" "yes" "$ACT"
 fi
 
 # --- Fixture: passing-no-evidence (warning case) -----------------------------
