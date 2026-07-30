@@ -10,6 +10,10 @@
 SKILL_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck source=../_lib/json_input.sh
 source "$SKILL_DIR/scripts/_lib/json_input.sh"
+# shellcheck source=../_lib/baseline.sh
+source "$SKILL_DIR/scripts/_lib/baseline.sh"
+# shellcheck source=../_lib/evidence.sh
+source "$SKILL_DIR/scripts/_lib/evidence.sh"
 
 HC_LOG_DIR="${HOME}/.claude/harness-companion/logs"
 mkdir -p "$HC_LOG_DIR" 2>/dev/null || HC_LOG_DIR="/tmp"
@@ -83,6 +87,24 @@ if command -v jq >/dev/null 2>&1 && [ -f feature_list.json ]; then
   NO_EVIDENCE="$(jq -r '.features[] | select((.status=="passing" or .status=="unverified") and (.evidence | length) == 0) | "  - \(.id): \(.title)"' feature_list.json 2>/dev/null || true)"
   if [ -n "$NO_EVIDENCE" ]; then
     MESSAGE+="[!!] These features are marked passing/unverified but have no evidence:\n$NO_EVIDENCE\n"
+  fi
+fi
+
+# 4. Stale-evidence check using SessionStart baseline (NOT mtime / not working tree).
+# The session-start hook persisted the HEAD SHA at session start. We compare each
+# passing feature's recorded evidence.commit against that baseline: a mismatch
+# means the feature was proven at a different commit than this session began
+# with — i.e. HEAD has moved. This is the "evidence committed against old HEAD"
+# case that mtime cannot detect.
+BASELINE_SHA="$(hc_baseline_read_commit "$(pwd)")"
+if [ -n "$BASELINE_SHA" ] && command -v jq >/dev/null 2>&1 && [ -f feature_list.json ]; then
+  STALE_IDS="$(jq -r --arg base "$BASELINE_SHA" \
+    '.features[]
+     | select(.status == "passing" and (.evidence | length) > 0)
+     | select((.evidence[-1].commit // "null") != $base)
+     | .id' feature_list.json 2>/dev/null | tr '\n' ' ')"
+  if [ -n "$STALE_IDS" ] && [ "$STALE_IDS" != " " ]; then
+    MESSAGE+="[!!] Evidence for these features is stale relative to the SessionStart baseline ($BASELINE_SHA -> $(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)):\n  - $STALE_IDS\n  Re-run /harness:verify to refresh.\n"
   fi
 fi
 

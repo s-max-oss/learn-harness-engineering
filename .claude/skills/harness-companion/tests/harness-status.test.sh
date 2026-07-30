@@ -46,7 +46,7 @@ fi
 FIX="$HERE/fixtures/passing-no-evidence"
 if [ -f "$SCRIPT" ] && command -v jq >/dev/null 2>&1; then
   run_capture "$SCRIPT" "$FIX"
-  if contains "$OUT" "passing features have no evidence"; then ACT="yes"; else ACT="no"; fi
+  if contains "$OUT" "have NO evidence"; then ACT="yes"; else ACT="no"; fi
   test "status: warns about passing feature with no evidence" "yes" "$ACT"
 else
   echo "  ⏭  status: warns about passing feature with no evidence (skipped: jq not installed)"

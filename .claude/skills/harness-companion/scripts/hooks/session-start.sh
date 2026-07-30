@@ -15,6 +15,8 @@
 SKILL_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck source=../_lib/json_input.sh
 source "$SKILL_DIR/scripts/_lib/json_input.sh"
+# shellcheck source=../_lib/baseline.sh
+source "$SKILL_DIR/scripts/_lib/baseline.sh"
 
 # Fail-open diagnostic logging. Best effort — never block.
 HC_LOG_DIR="${HOME}/.claude/harness-companion/logs"
@@ -47,6 +49,15 @@ cd "$CWD" 2>/dev/null || { _log "cd failed for $CWD"; emit_continue_only; }
 # Only activate if harness files are present.
 if [ ! -f "feature_list.json" ]; then
   emit_continue_only
+fi
+
+# Persist the session-start baseline commit so the stop hook can detect HEAD
+# movement during the session. Fail-open: any error here just skips baseline.
+if git rev-parse --git-dir >/dev/null 2>&1; then
+  BASELINE_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || true)"
+  if [ -n "$BASELINE_SHA" ]; then
+    hc_baseline_write "$(pwd)" "$BASELINE_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%s)"
+  fi
 fi
 
 # Build the status text in a temp file, then JSON-escape it via jq/python.

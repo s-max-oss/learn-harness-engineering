@@ -1,0 +1,22 @@
+{
+  "project": "v0-legacy-project",
+  "last_updated": "2026-07-30",
+  "rules": {
+    "single_active_feature": true,
+    "passing_requires_evidence": true,
+    "do_not_skip_verification": true
+  },
+  "features": [
+    {
+      "id": "v0-feat-001",
+      "priority": 1,
+      "area": "core",
+      "title": "Legacy v0 feature",
+      "user_visible_behavior": "This is the old format",
+      "status": "not_started",
+      "verification": ["npm test", "npm run build"],
+      "evidence": [],
+      "notes": ""
+    }
+  ]
+}

@@ -138,9 +138,18 @@ ev_append() {
 }
 
 # Determine if the most recent evidence record for a feature is stale.
-# Stale means: HEAD differs from the recorded commit AND working tree differs from
-# the recorded working_tree_state. Non-git repos always return "false" (we can't
-# decide staleness, so we err on the side of letting verify proceed with a warning).
+#
+# Default rule (v1): evidence is stale if `evidence.commit != current HEAD`.
+# Rationale: a feature was proven at a specific commit. Once HEAD moves (any new
+# commit — agent or human), the proven-against state no longer matches what HEAD
+# points at, so the "passing" claim must be re-verified.
+#
+# Working tree state is no longer part of the default rule. We used to require
+# BOTH commit-mismatch AND tree-change, which meant a commit-only change was
+# silently accepted as "not stale" — the very thing we want to catch.
+#
+# Non-git repos always return "false" (we can't decide staleness, so we err on
+# the side of letting verify proceed with a warning).
 ev_is_stale() {
   local fid="$1"
   local fl="${EV_FEATURE_LIST:-feature_list.json}"
@@ -156,14 +165,11 @@ ev_is_stale() {
     printf 'false'
     return 0
   fi
-  local rec_commit rec_state
+  local rec_commit
   rec_commit="$(printf '%s' "$last" | jq -r '.commit // "null"')"
-  rec_state="$(printf '%s' "$last" | jq -r '.working_tree_state // "no_git"')"
 
   local current_commit
   current_commit="$(ev_git_commit)"
-  local current_state
-  current_state="$(ev_git_tree_state)"
 
   # No git → we don't claim stale.
   if [ "$rec_commit" = "null" ] || [ "$current_commit" = "null" ]; then
@@ -171,7 +177,40 @@ ev_is_stale() {
     return 0
   fi
 
-  if [ "$rec_commit" != "$current_commit" ] && [ "$rec_state" != "$current_state" ]; then
+  # Default rule: commit mismatch → stale.
+  if [ "$rec_commit" != "$current_commit" ]; then
+    printf 'true'
+  else
+    printf 'false'
+  fi
+}
+
+# Same as ev_is_stale but takes an explicit baseline commit override. If the
+# session-start hook saved a baseline (HEAD SHA at session start), use that
+# instead of the current HEAD so we catch the "HEAD moved mid-session" case.
+ev_is_stale_vs_baseline() {
+  local fid="$1"
+  local baseline_commit="$2"
+  local fl="${EV_FEATURE_LIST:-feature_list.json}"
+  if [ ! -f "$fl" ] || [ "$EV_HAS_JQ" -eq 0 ]; then
+    printf 'false'
+    return 0
+  fi
+  local last
+  last="$(jq -c --arg fid "$fid" '
+    .features[] | select(.id == $fid) | .evidence | last // empty
+  ' "$fl" 2>/dev/null || true)"
+  if [ -z "$last" ]; then
+    printf 'false'
+    return 0
+  fi
+  local rec_commit
+  rec_commit="$(printf '%s' "$last" | jq -r '.commit // "null"')"
+  if [ -z "$baseline_commit" ] || [ "$baseline_commit" = "null" ]; then
+    printf 'false'
+    return 0
+  fi
+  if [ "$rec_commit" != "$baseline_commit" ]; then
     printf 'true'
   else
     printf 'false'

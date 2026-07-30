@@ -31,11 +31,11 @@ if [ -f "$SCRIPT" ]; then
 fi
 
 # --- Snapshot: WIP=1 enforcement ---------------------------------------------
-FIX="$HERE/fixtures/multiple-in-progress"
+FIX="$HERE/fixtures/wip-one-active"
 if [ -f "$SCRIPT" ]; then
-  OUT="$(cd "$FIX" && "$SCRIPT" status a-001 in_progress 2>&1)"
-  if printf '%s' "$OUT" | grep -q "WIP=1 rule"; then ACT="yes"; else ACT="no"; fi
-  test "feature status: WIP=1 violation blocks setting another in_progress" "yes" "$ACT"
+  OUT="$(cd "$FIX" && "$SCRIPT" status . a-002 in_progress 2>&1)"
+  if printf '%s' "$OUT" | grep -q "WIP limit reached"; then ACT="yes"; else ACT="no"; fi
+  test "feature status: WIP=1 violation blocks setting another in_progress (a-001 active, try a-002)" "yes" "$ACT"
 fi
 
 # --- @known-bug: --force silently bypasses evidence requirement --------------

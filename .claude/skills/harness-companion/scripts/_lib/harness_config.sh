@@ -106,65 +106,61 @@ hc_command_for() {
 #   { files_any: ["a", "b"] }     -> true if any of those files exists in HC_CONFIG_DIR
 #   { package_json_has_script: "test" } -> true if package.json has that script
 # If no applies_when is present, we default to true.
+#
+# Implementation note: we deliberately avoid jq+env expressions here because
+# jq version differences around `env.HC_CONFIG_DIR` made the v1 implementation
+# silently return false for `package_json_has_script`. The shell loop below is
+# explicit, tested, and portable.
 hc_applies() {
   local cmd_json="$1"
   if [ -z "$cmd_json" ]; then
     printf 'false'
     return 0
   fi
-  if ! command -v jq >/dev/null 2>&1; then
+
+  local files_any has_script
+  if command -v jq >/dev/null 2>&1; then
+    files_any="$(printf '%s' "$cmd_json" | jq -r '.applies_when.files_any[]? // empty' 2>/dev/null || true)"
+    has_script="$(printf '%s' "$cmd_json" | jq -r '.applies_when.package_json_has_script // empty' 2>/dev/null || true)"
+  else
+    # No jq: assume applies (fail-open at the predicate layer; verify.sh exits 2
+    # earlier if jq is missing entirely, so this is only hit on misconfig).
     printf 'true'
     return 0
   fi
-  local result
-  result="$(printf '%s' "$cmd_json" | jq -r '
-    .applies_when as $w |
-    if ($w == null) then "true"
-    else
-      (
-        (if ($w.files_any // null) != null then
-            (any($w.files_any[]; . as $f | ($ENV.HC_CONFIG_DIR + "/" + $f) | test("^/") as $_ | true))
-         else null end)
-        // (if ($w.package_json_has_script // null) != null then
-            ((env.HC_CONFIG_DIR + "/package.json") as $pj |
-             (try ($pj | @text) catch "") | false)
-         else null end)
-        // "false"
-      ) as $r |
-      if $r == null then "true" else $r end
-    ' env HC_CONFIG_DIR="$HC_CONFIG_DIR" 2>/dev/null || echo "false")"
 
-  # jq's @text/env handling differs by version. The expression above is best-effort;
-  # fall back to a pure-shell reimplementation for the two predicate shapes we support.
-  if [ "$result" != "true" ] && [ "$result" != "false" ]; then
-    local files_any has_script
-    files_any="$(printf '%s' "$cmd_json" | jq -r '.applies_when.files_any // empty' 2>/dev/null || true)"
-    has_script="$(printf '%s' "$cmd_json" | jq -r '.applies_when.package_json_has_script // empty' 2>/dev/null || true)"
-
-    if [ -n "$files_any" ]; then
-      local match=0
-      while IFS= read -r f; do
-        [ -z "$f" ] && continue
-        if [ -e "$HC_CONFIG_DIR/$f" ]; then
-          match=1
-          break
-        fi
-      done <<EOFILES
-$files_any
-EOFILES
-      [ "$match" -eq 1 ] && result="true" || result="false"
-    elif [ -n "$has_script" ]; then
-      if [ -f "$HC_CONFIG_DIR/package.json" ] && grep -q "\"$has_script\"" "$HC_CONFIG_DIR/package.json" 2>/dev/null; then
-        result="true"
-      else
-        result="false"
-      fi
-    else
-      result="true"
-    fi
+  if [ -z "$files_any" ] && [ -z "$has_script" ]; then
+    # No applies_when -> always applies.
+    printf 'true'
+    return 0
   fi
 
-  printf '%s' "$result"
+  if [ -n "$files_any" ]; then
+    local f
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      if [ -e "$HC_CONFIG_DIR/$f" ]; then
+        printf 'true'
+        return 0
+      fi
+    done <<EOFILES
+$files_any
+EOFILES
+    printf 'false'
+    return 0
+  fi
+
+  if [ -n "$has_script" ]; then
+    if [ -f "$HC_CONFIG_DIR/package.json" ] && \
+       grep -qE "\"$has_script\"\s*:" "$HC_CONFIG_DIR/package.json" 2>/dev/null; then
+      printf 'true'
+      return 0
+    fi
+    printf 'false'
+    return 0
+  fi
+
+  printf 'true'
 }
 
 hc_required_ids() {

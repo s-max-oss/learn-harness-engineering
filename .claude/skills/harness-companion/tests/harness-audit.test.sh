@@ -41,7 +41,7 @@ if [ -f "$SCRIPT" ]; then
   if printf '%s' "$OUT" | grep -qE '^  Knowledge +0/3'; then ACT="yes"; else ACT="no"; fi
   test "audit: Knowledge=0/3 when AGENTS.md+CLAUDE.md are missing" "yes" "$ACT"
   # Scope/Feature >=1 because feature_list.json exists (existence pass)
-  if printf '%s' "$OUT" | grep -qE '^  Scope/Feature +[12]/3'; then ACT="yes"; else ACT="no"; fi
+  if printf '%s' "$OUT" | grep -qE '^  Scope/Feature +[123]/3'; then ACT="yes"; else ACT="no"; fi
   test "audit: Scope/Feature >= 1/3 because feature_list.json exists" "yes" "$ACT"
 fi
 
