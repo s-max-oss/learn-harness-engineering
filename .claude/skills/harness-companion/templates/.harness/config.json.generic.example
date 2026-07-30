@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "project_type": "generic",
+  "verification": {
+    "min_required_for_passing": [],
+    "commands": []
+  },
+  "feature_list": {
+    "wip_limit": 1,
+    "allow_force": true,
+    "force_requires": { "reason": true, "actor": true, "timestamp": true }
+  }
+}

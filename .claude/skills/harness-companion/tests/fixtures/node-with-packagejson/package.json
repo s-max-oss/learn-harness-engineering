@@ -1,0 +1,10 @@
+{
+  "name": "node-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "check": "node -e \"process.exit(0)\"",
+    "build": "node -e \"console.log('build ok')\"",
+    "test": "node -e \"console.log('test ok')\""
+  }
+}

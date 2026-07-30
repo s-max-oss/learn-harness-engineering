@@ -1,0 +1,8 @@
+{
+  "name": "node-no-test-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node -e \"console.log('build ok')\""
+  }
+}

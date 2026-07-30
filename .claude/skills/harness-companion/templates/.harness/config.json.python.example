@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "project_type": "python",
+  "verification": {
+    "min_required_for_passing": ["typecheck", "test"],
+    "commands": [
+      {
+        "id": "typecheck",
+        "command": ["python", "-m", "mypy", "."],
+        "timeout_seconds": 300,
+        "required_for_passing": true,
+        "applies_when": { "files_any": ["mypy.ini", "pyproject.toml"] }
+      },
+      {
+        "id": "test",
+        "command": ["python", "-m", "pytest"],
+        "timeout_seconds": 600,
+        "required_for_passing": true,
+        "applies_when": { "files_any": ["pytest.ini", "pyproject.toml", "tests/"] }
+      },
+      {
+        "id": "lint",
+        "command": ["python", "-m", "ruff", "check", "."],
+        "timeout_seconds": 120,
+        "required_for_passing": false,
+        "applies_when": { "files_any": ["ruff.toml", ".ruff.toml", "pyproject.toml"] }
+      }
+    ]
+  },
+  "feature_list": {
+    "wip_limit": 1,
+    "allow_force": true,
+    "force_requires": { "reason": true, "actor": true, "timestamp": true }
+  }
+}

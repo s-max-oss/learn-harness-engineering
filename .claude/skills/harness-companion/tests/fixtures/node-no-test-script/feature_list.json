@@ -1,0 +1,17 @@
+{
+  "project": "node-no-test-fixture",
+  "last_updated": "2026-07-30",
+  "features": [
+    {
+      "id": "f-100",
+      "priority": 1,
+      "area": "core",
+      "title": "Build-only feature",
+      "user_visible_behavior": "Demo",
+      "status": "not_started",
+      "verification": ["npm run build"],
+      "evidence": [],
+      "notes": ""
+    }
+  ]
+}

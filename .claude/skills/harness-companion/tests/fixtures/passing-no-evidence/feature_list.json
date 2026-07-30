@@ -1,0 +1,17 @@
+{
+  "project": "passing-no-evidence",
+  "last_updated": "2026-07-30",
+  "features": [
+    {
+      "id": "ghost-001",
+      "priority": 1,
+      "area": "core",
+      "title": "Phantom passing feature",
+      "user_visible_behavior": "Demo",
+      "status": "passing",
+      "verification": ["npm test"],
+      "evidence": [],
+      "notes": ""
+    }
+  ]
+}

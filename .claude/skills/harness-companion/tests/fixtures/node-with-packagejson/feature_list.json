@@ -1,0 +1,22 @@
+{
+  "project": "node-fixture",
+  "last_updated": "2026-07-30",
+  "rules": {
+    "single_active_feature": true,
+    "passing_requires_evidence": true,
+    "do_not_skip_verification": true
+  },
+  "features": [
+    {
+      "id": "f-001",
+      "priority": 1,
+      "area": "core",
+      "title": "Example feature",
+      "user_visible_behavior": "Demo feature",
+      "status": "not_started",
+      "verification": ["npm test"],
+      "evidence": [],
+      "notes": ""
+    }
+  ]
+}

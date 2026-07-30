@@ -1,0 +1,17 @@
+{
+  "project": "python-fixture",
+  "last_updated": "2026-07-30",
+  "features": [
+    {
+      "id": "py-001",
+      "priority": 1,
+      "area": "core",
+      "title": "Python example",
+      "user_visible_behavior": "Demo",
+      "status": "not_started",
+      "verification": ["pytest"],
+      "evidence": [],
+      "notes": ""
+    }
+  ]
+}

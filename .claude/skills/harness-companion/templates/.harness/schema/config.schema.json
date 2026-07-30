@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-companion.local/schemas/config.schema.json",
+  "title": "Harness Companion config",
+  "description": "Versioned project-level configuration consumed by harness-companion scripts. Schema version is bumped on backwards-incompatible changes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "project_type", "verification"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema major version. Bumped on backwards-incompatible changes."
+    },
+    "project_type": {
+      "type": "string",
+      "enum": ["node", "typescript", "python", "generic"],
+      "description": "Detected project ecosystem. Used by audit and to choose example configs."
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commands", "min_required_for_passing"],
+      "properties": {
+        "min_required_for_passing": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 0,
+          "description": "Subset of verification command ids that MUST pass for a feature to be marked 'passing'. Empty array means 'no command is required' — useful for documentation-only repos."
+        },
+        "commands": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/verification_command" }
+        }
+      }
+    },
+    "feature_list": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "wip_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "Maximum number of features allowed in 'in_progress' status simultaneously. Default 1."
+        },
+        "allow_force": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether the --force flag is honored at all on harness-feature.sh."
+        },
+        "force_requires": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "reason": { "type": "boolean", "default": true },
+            "actor": { "type": "boolean", "default": true },
+            "timestamp": { "type": "boolean", "default": true }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "verification_command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "command", "required_for_passing"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "description": "Stable identifier used in evidence records and audit output."
+        },
+        "command": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "description": "Command to execute as an argv array. Each element is a separate argument; harness-companion does NOT perform shell interpolation."
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 300,
+          "description": "Maximum runtime before we forcibly kill the command and treat it as failed."
+        },
+        "required_for_passing": {
+          "type": "boolean",
+          "description": "Whether this command must pass for a feature to be marked passing."
+        },
+        "applies_when": {
+          "type": "object",
+          "description": "Predicate evaluated against the project. If true (or absent) the command runs.",
+          "oneOf": [
+            {
+              "required": ["files_any"],
+              "properties": {
+                "files_any": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "minItems": 1
+                }
+              }
+            },
+            {
+              "required": ["package_json_has_script"],
+              "properties": {
+                "package_json_has_script": { "type": "string", "minLength": 1 }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
