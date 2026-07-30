@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.1.0",
+  "project_type": "node",
+  "feature_list": {
+    "wip_limit": 1
+  },
+  "verification": {
+    "commands": [
+      {
+        "id": "typecheck",
+        "command": ["npx", "tsc", "--noEmit"],
+        "timeout_seconds": 60,
+        "required_for_passing": true
+      },
+      {
+        "id": "build",
+        "command": ["npm", "run", "build"],
+        "timeout_seconds": 120,
+        "required_for_passing": true
+      },
+      {
+        "id": "test",
+        "command": ["npm", "test"],
+        "timeout_seconds": 300,
+        "required_for_passing": true
+      }
+    ]
+  }
+}

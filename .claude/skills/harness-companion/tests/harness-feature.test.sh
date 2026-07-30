@@ -90,4 +90,31 @@ test "feature status: partial evidence — status stays in_progress" \
      "in_progress" "$FINAL_STATUS"
 ht_rmrf "$TMP"
 
+# --- verify --write and feature status passing agree (v1.1.1) ------------------
+# Both scripts use is_eligible_for_passing from the shared library. After a
+# successful verify --write, promoting to passing via harness-feature.sh must
+# also succeed (same commit, same evidence, same criteria).
+FIX="$HERE/fixtures/node-with-packagejson"
+TMP="$(ht_mktmp feat-agreement)"
+cp -a "$FIX"/* "$TMP/" 2>/dev/null || cp -r "$FIX"/* "$TMP/"
+mkdir -p "$TMP/.harness"
+cp "$SKILL_DIR/templates/.harness/config.json.node.example" "$TMP/.harness/config.json"
+(cd "$TMP" && git init -q -b main && git add -A && \
+   git -c user.email=test@test -c user.name=test commit -q -m initial) >/dev/null 2>&1
+# Step 1: verify --write marks passing.
+VERIFY_OUT="$("$SKILL_DIR/scripts/harness-verify.sh" "f-001" "$TMP" --write 2>&1)"
+VERIFY_EXIT=$?
+test "feature agreement: verify --write exits 0" "0" "$VERIFY_EXIT"
+VERIFY_STATUS="$(jq -r '.features[0].status' "$TMP/feature_list.json")"
+test "feature agreement: verify --write sets status=passing" "passing" "$VERIFY_STATUS"
+# Step 2: reset to in_progress, then promote via harness-feature.sh.
+jq '(.features[] | select(.id == "f-001") | .status) = "in_progress"' \
+  "$TMP/feature_list.json" > "$TMP/tmp.json" && mv "$TMP/tmp.json" "$TMP/feature_list.json"
+FEAT_OUT="$(cd "$TMP" && "$SCRIPT" status . f-001 passing 2>&1)"
+FEAT_EXIT=$?
+test "feature agreement: harness-feature.sh status passing exits 0" "0" "$FEAT_EXIT"
+FEAT_STATUS="$(jq -r '.features[0].status' "$TMP/feature_list.json")"
+test "feature agreement: harness-feature.sh sets status=passing" "passing" "$FEAT_STATUS"
+ht_rmrf "$TMP"
+
 ht_summary

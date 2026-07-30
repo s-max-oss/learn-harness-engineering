@@ -275,9 +275,121 @@ echo "// follow-up commit" >> "$TMP/extra.js"
 SECOND_COMMIT="$(cd "$TMP" && git rev-parse --short=12 HEAD)"
 test "verify: HEAD-moved — HEAD is now different commit" "different" \
      "$(if [ "$FIRST_COMMIT" = "$SECOND_COMMIT" ]; then echo same; else echo different; fi)"
-# Re-run verify — should refuse because the previous evidence.commit != HEAD.
+# Re-run verify — v1.1.1: commands actually run and produce fresh evidence against
+# the new HEAD. Even though prior evidence is stale, the new evidence.commit
+# equals current HEAD, so the run succeeds.
 run_capture "$SCRIPT" "f-001" "$TMP" --write
-test "verify: HEAD-moved — re-run after HEAD change exits 3 (stale)" "3" "$RUN_EXIT"
+test "verify: HEAD-moved — re-run at new HEAD succeeds (exit 0, fresh evidence)" "0" "$RUN_EXIT"
+test "verify: HEAD-moved — new evidence.commit equals current HEAD" "$SECOND_COMMIT" \
+     "$(jq -r '.features[0].evidence[-1].commit' "$TMP/feature_list.json")"
+ht_rmrf "$TMP"
+
+# --- Scenario 7: fail-then-fix-then-pass ---------------------------------------
+# Real-world: a required command fails first, gets fixed, then passes on re-run.
+# v1.1.1: the second run produces fresh evidence with a new run_id and succeeds.
+TMP="$(make_tmp_with_config node-with-packagejson config.json.node.example)"
+(cd "$TMP" && git init -q -b main && git add -A && \
+   git -c user.email=test@test -c user.name=test commit -q -m initial) >/dev/null 2>&1
+# First: a command that fails.
+cat > "$TMP/.harness/config.json" <<'JSON'
+{
+  "schema_version": 1,
+  "project_type": "node",
+  "verification": {
+    "min_required_for_passing": ["failer"],
+    "commands": [
+      {
+        "id": "failer",
+        "command": ["node", "-e", "process.exit(3)"],
+        "timeout_seconds": 30,
+        "required_for_passing": true,
+        "applies_when": { "files_any": ["package.json"] }
+      }
+    ]
+  }
+}
+JSON
+run_capture "$SCRIPT" "f-001" "$TMP" --write
+test "verify: fail-then-fix — first run with failing command exits 1" "1" "$RUN_EXIT"
+FIRST_RUN_ID="$(jq -r '.features[0].evidence[-1].run_id' "$TMP/feature_list.json")"
+test "verify: fail-then-fix — first evidence record has a run_id" "1" \
+     "$(printf '%s' "$FIRST_RUN_ID" | grep -c 'T' || true)"
+# Fix: change command to succeed.
+cat > "$TMP/.harness/config.json" <<'JSON'
+{
+  "schema_version": 1,
+  "project_type": "node",
+  "verification": {
+    "min_required_for_passing": ["failer"],
+    "commands": [
+      {
+        "id": "failer",
+        "command": ["node", "-e", "console.log('fixed!')"],
+        "timeout_seconds": 30,
+        "required_for_passing": true,
+        "applies_when": { "files_any": ["package.json"] }
+      }
+    ]
+  }
+}
+JSON
+run_capture "$SCRIPT" "f-001" "$TMP" --write
+test "verify: fail-then-fix — re-run after fix exits 0" "0" "$RUN_EXIT"
+test "verify: fail-then-fix — feature status is now passing" "passing" \
+     "$(jq -r '.features[0].status' "$TMP/feature_list.json")"
+SECOND_RUN_ID="$(jq -r '.features[0].evidence[-1].run_id' "$TMP/feature_list.json")"
+test "verify: fail-then-fix — second evidence record has a different run_id" "different" \
+     "$(if [ "$FIRST_RUN_ID" = "$SECOND_RUN_ID" ]; then echo same; else echo different; fi)"
+# Verify that the passing check ONLY uses the second run's records (not the first's)
+test "verify: fail-then-fix — second run_id evidence has exit_code 0" "0" \
+     "$(jq -r --arg rid "$SECOND_RUN_ID" \
+        '.features[0].evidence[] | select(.run_id == $rid) | .exit_code' \
+        "$TMP/feature_list.json")"
+ht_rmrf "$TMP"
+
+# --- Scenario 8: two incomplete runs cannot be cobbled for passing ------------
+# Real-world: Run A covers typecheck only, Run B covers test only. Even though
+# together they look complete, different run_ids mean the latest run (B) is
+# incomplete → not eligible for passing.
+FIX="$HERE/fixtures/two-runs"
+TMP="$(ht_mktmp verify-two-runs)"
+cp -a "$FIX"/* "$TMP/" 2>/dev/null || cp -r "$FIX"/* "$TMP/"
+cp -a "$FIX/.harness" "$TMP/" 2>/dev/null || true
+OUT="$(cd "$TMP" && "$SKILL_DIR/scripts/harness-feature.sh" status . two-runs-001 passing 2>&1)"
+RUN_EXIT=$?
+test "verify: two-runs — feature status passing is REJECTED (exit != 0)" "1" \
+     "$(if [ "$RUN_EXIT" != "0" ]; then echo 1; else echo 0; fi)"
+if printf '%s' "$OUT" | grep -q "missing"; then ACT="yes"; else ACT="no"; fi
+test "verify: two-runs — error mentions missing commands" "yes" "$ACT"
+FINAL_STATUS="$(cd "$TMP" && jq -r '.features[0].status' feature_list.json 2>/dev/null)"
+test "verify: two-runs — status stays in_progress" "in_progress" "$FINAL_STATUS"
+ht_rmrf "$TMP"
+
+# --- Scenario 9: old-commit evidence does not satisfy new HEAD at feature level
+# Real-world: evidence at commit A was passing. HEAD moves to commit B.
+# harness-feature.sh status <id> passing must REJECT because evidence.commit ≠ HEAD.
+TMP="$(make_tmp_with_config node-with-packagejson config.json.node.example)"
+(cd "$TMP" && git init -q -b main && git add -A && \
+   git -c user.email=test@test -c user.name=test commit -q -m initial) >/dev/null 2>&1
+# Run verify at commit A → passes.
+run_capture "$SCRIPT" "f-001" "$TMP" --write
+test "verify: old-commit — initial verify succeeds" "0" "$RUN_EXIT"
+FIRST_COMMIT="$(cd "$TMP" && git rev-parse --short=12 HEAD)"
+# Move HEAD to commit B.
+echo "// new commit" >> "$TMP/extra.js"
+(cd "$TMP" && git add -A && \
+   git -c user.email=test@test -c user.name=test commit -q -m follow-up) >/dev/null 2>&1
+# Reset feature to in_progress so the state machine allows in_progress→passing.
+# (verify --write already set it to passing at the old commit.)
+jq '(.features[] | select(.id == "f-001") | .status) = "in_progress"' \
+  "$TMP/feature_list.json" > "$TMP/tmp.json" && mv "$TMP/tmp.json" "$TMP/feature_list.json"
+# Try to promote to passing via harness-feature.sh → should REJECT (stale).
+OUT="$(cd "$TMP" && "$SKILL_DIR/scripts/harness-feature.sh" status . f-001 passing 2>&1)"
+RUN_EXIT=$?
+test "verify: old-commit — feature status passing is REJECTED after HEAD moves" "1" \
+     "$(if [ "$RUN_EXIT" != "0" ]; then echo 1; else echo 0; fi)"
+if printf '%s' "$OUT" | grep -q "stale"; then ACT="yes"; else ACT="no"; fi
+test "verify: old-commit — error mentions stale evidence" "yes" "$ACT"
 ht_rmrf "$TMP"
 
 ht_summary

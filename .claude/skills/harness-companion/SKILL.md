@@ -161,9 +161,14 @@ Handoff:     session-handoff.md ✓  clean-state-checklist.md ✓
      "working_tree_state": "clean",
      "summary": "command typecheck exited 0",
      "log_artifact": ".harness/logs/verify-typecheck-20260727T100000Z.log",
-     "log_sha256": "6dcd4ce23d88e…"
+     "log_sha256": "6dcd4ce23d88e…",
+     "run_id": "20260730T151257Z-12345-32767"
    }
    ```
+   Each record includes a `run_id` (timestamp-PID-RANDOM) that groups records
+   from the same verify invocation. Passing eligibility is based on the **latest
+   complete run only** — records from different `run_id`s cannot be cobbled
+   together to satisfy passing requirements.
 5. Append the records to the feature's `evidence[]`. **Dry-run by default**;
    pass `--write` to also flip the feature's status to `passing` and update
    `feature_list.last_updated`.

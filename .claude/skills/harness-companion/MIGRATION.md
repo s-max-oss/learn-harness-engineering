@@ -137,6 +137,67 @@ A perfect-execution empty-project can no longer score 3 on Knowledge.
 and treat v1 scores as the new ground truth. Output is byte-deterministic
 across consecutive runs, so trends over time are meaningful.
 
+## v1.1.0 → v1.1.1: Evidence run semantics
+
+v1.1.1 fixes a stale-reverification bug and introduces run-based passing
+eligibility. No new features.
+
+### Stale re-verification fixed
+
+**v1.1.0**: After HEAD moved, `harness-verify.sh` read the OLD evidence from
+disk during the post-command stale check. The function `ev_is_stale` compared
+the file's evidence.commit (not yet updated) against the new HEAD — always
+found it stale — and always exited 3. Users could never refresh stale evidence.
+
+**v1.1.1**: The stale guard was removed from the post-command path. When
+commands run and produce fresh evidence, `evidence.commit == current HEAD`, so
+the re-verify succeeds. Staleness is now checked by `is_eligible_for_passing`
+(shared library), which reads from the UPDATED file.
+
+### `run_id` groups evidence records from the same invocation
+
+Every `harness-verify.sh` invocation now generates a unique `run_id`
+(timestamp-PID-RANDOM). All evidence records produced during that invocation
+share the same `run_id`. The new evidence record schema:
+
+```json
+{
+  "id": "typecheck",
+  "exit_code": 0,
+  "commit": "abc1234",
+  "run_id": "20260730T151257Z-12345-32767"
+}
+```
+
+### Passing is based on the latest complete run only
+
+The new shared library `scripts/_lib/passing.sh` exports
+`is_eligible_for_passing(fid, fl)`, consumed by both `harness-verify.sh` and
+`harness-feature.sh`. It enforces:
+
+1. Only evidence records from the **latest `run_id`** count toward passing.
+2. All records in that run must have `exit_code == 0`.
+3. That run must cover every `required_for_passing != false` command.
+4. That run's commit must match current HEAD (git repos only).
+
+Records from different historical runs cannot be cobbled together. A feature
+with typecheck evidence from run A and test evidence from run B will NOT be
+eligible for passing — even if together they cover all required commands.
+
+### Shared passing strategy
+
+`harness-verify.sh --write` and `harness-feature.sh status <id> passing` now
+call the same `is_eligible_for_passing` function, guaranteeing consistent
+verdicts. The old `validate_passing_evidence` function (~68 lines) was deleted
+from `harness-feature.sh`.
+
+### Migration
+
+No manual steps required. Existing evidence records without `run_id` are
+treated as legacy singletons: only the very last record counts for passing
+eligibility. Re-run `/harness:verify --write` to produce `run_id`-tagged
+evidence.
+
 ## Soft improvements
 
 ### 5. Hooks no longer crash

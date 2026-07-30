@@ -103,15 +103,20 @@ Each verified command writes one structured record into the feature's
   "working_tree_state": "clean",
   "summary": "command typecheck exited 0",
   "log_artifact": ".harness/logs/verify-typecheck-20260727T100000Z.log",
-  "log_sha256": "6dcd4ce23d88e…"
+  "log_sha256": "6dcd4ce23d88e…",
+  "run_id": "20260730T151257Z-12345-32767"
 }
 ```
 
-v1.1 passing validation requires:
+v1.1.1 passing validation (latest-run-only):
 1. Evidence objects (string evidence from v0 is rejected)
-2. All records have `exit_code: 0`
-3. Latest `evidence[-1].commit` matches current HEAD
-4. Every `required_for_passing != false` command is represented
+2. Only records from the **latest `run_id`** are considered
+3. All considered records have `exit_code: 0`
+4. Considered records cover every `required_for_passing != false` command
+5. Latest run's `.commit` matches current HEAD (git repos only)
+
+Records from different historical runs cannot be combined to satisfy passing
+requirements.
 
 The audit script and feature state machine read these records. Do not write
 hand-crafted string evidence — `harness-feature.sh` will refuse a `passing`

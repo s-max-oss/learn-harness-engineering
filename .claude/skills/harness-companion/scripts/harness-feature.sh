@@ -33,6 +33,8 @@ SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SKILL_DIR/_lib/atomic_write.sh"
 # shellcheck source=_lib/harness_config.sh
 source "$SKILL_DIR/_lib/harness_config.sh"
+# shellcheck source=_lib/passing.sh
+source "$SKILL_DIR/_lib/passing.sh"
 
 # Sourcing the _lib files above flips `set -e` on (atomic_write.sh declares
 # `set -euo pipefail`). We want to keep errexit OFF here so a jq failure
@@ -134,74 +136,6 @@ add_feature() {
   echo "Don't forget to fill in user_visible_behavior and verification steps."
 }
 
-# --- evidence validation for passing -------------------------------------------
-# Validates that a feature's evidence supports a passing claim. Checks:
-#   1. Evidence exists and is structured (objects, not v0 strings)
-#   2. Every evidence record has exit_code == 0
-#   3. Latest evidence.commit matches current HEAD (in git repos)
-#   4. Evidence covers all min_required_for_passing commands from config
-# Returns 0 if passing is justified, 1 with an explanation on stderr otherwise.
-validate_passing_evidence() {
-  local fid="$1" fl="$2"
-  local errs=0
-
-  # 1 — non-empty structured evidence
-  local count has_strings
-  count="$(jq -r --arg fid "$fid" \
-    '[.features[] | select(.id == $fid) | .evidence[]?] | length' "$fl")"
-  if [ "$count" = "0" ] || [ -z "$count" ]; then
-    echo "Error: feature '$fid' has no evidence. Run /harness:verify first." >&2
-    return 1
-  fi
-  has_strings="$(jq -r --arg fid "$fid" \
-    '[.features[] | select(.id == $fid) | .evidence[] | select(type == "string")] | length' "$fl")"
-  if [ "$has_strings" != "0" ]; then
-    echo "Error: feature '$fid' has $has_strings string evidence record(s) (legacy v0 format)." >&2
-    echo "Re-run /harness:verify to produce structured evidence records." >&2
-    errs=$((errs + 1))
-  fi
-
-  # 2 — every evidence record has exit_code == 0
-  local failed
-  failed="$(jq -r --arg fid "$fid" \
-    '[.features[] | select(.id == $fid) | .evidence[] | select(.exit_code != 0)] | length' "$fl")"
-  if [ "$failed" != "0" ]; then
-    echo "Error: feature '$fid' has $failed evidence record(s) with non-zero exit code." >&2
-    echo "All required verification commands must pass before marking as passing." >&2
-    errs=$((errs + 1))
-  fi
-
-  # 3 — latest evidence.commit == current HEAD (git repos only)
-  if git rev-parse --git-dir >/dev/null 2>&1; then
-    local last_commit head_commit
-    last_commit="$(jq -r --arg fid "$fid" \
-      '.features[] | select(.id == $fid) | (.evidence[-1].commit // "null")' "$fl")"
-    head_commit="$(git rev-parse --short=12 HEAD 2>/dev/null || echo "null")"
-    if [ "$last_commit" != "null" ] && [ "$head_commit" != "null" ] \
-       && [ "$last_commit" != "$head_commit" ]; then
-      echo "Error: evidence is stale — proven at $last_commit, HEAD is $head_commit." >&2
-      echo "Re-run /harness:verify to refresh evidence against current HEAD." >&2
-      errs=$((errs + 1))
-    fi
-  fi
-
-  # 4 — evidence covers all required commands from .harness/config.json
-  local cfg="${HC_CONFIG_DIR:-.}/.harness/config.json"
-  if [ -f "$cfg" ] && command -v jq >/dev/null 2>&1; then
-    local required_ids covered_ids missing
-    required_ids="$(jq -r '[.verification.commands[]? | select(.required_for_passing != false) | .id] | sort | unique | .[]' "$cfg" 2>/dev/null || true)"
-    covered_ids="$(jq -r --arg fid "$fid" \
-      '[.features[] | select(.id == $fid) | .evidence[]? | .id // "?"] | sort | unique | .[]' "$fl" 2>/dev/null || true)"
-    missing="$(comm -23 <(printf '%s' "$required_ids") <(printf '%s' "$covered_ids") 2>/dev/null || true)"
-    if [ -n "$missing" ]; then
-      echo "Error: evidence missing for required command(s): $(echo "$missing" | tr '\n' ' ')" >&2
-      echo "Re-run /harness:verify to execute all required verification commands." >&2
-      errs=$((errs + 1))
-    fi
-  fi
-
-  return "$errs"
-}
 
 # --- status update -----------------------------------------------------------
 # Transitions table. Echoes 0 if allowed, 1 if not.
@@ -291,7 +225,7 @@ update_status() {
 
   # Evidence check when promoting to passing.
   if [ "$new_status" = "passing" ]; then
-    if ! validate_passing_evidence "$id" "$fl"; then
+    if ! is_eligible_for_passing "$id" "$fl"; then
       if [ -z "$override_reason" ]; then
         echo "If you must proceed anyway, use: status $id unverified --override \"<reason>\"" >&2
         return 1
