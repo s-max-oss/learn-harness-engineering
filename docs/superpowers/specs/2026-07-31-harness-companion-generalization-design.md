@@ -1,107 +1,82 @@
-# harness-companion 通用化升级 — 方案设计 v3
+# harness-companion 通用化升级 — 方案设计 v4
 
-> 状态: **等待审批** | 日期: 2026-07-31 | 修订: v3
-> v2 (已撤回) → v3: 设计评审修订
+> 状态: **等待审批** | 日期: 2026-07-31 | 修订: v4
+> v3 (已撤回) → v4: correctness 修订
 
 ---
 
 ## 决策摘要
 
-| 决策 | 结论 | 理由 |
-|------|------|------|
-| Codex adapter 投入深度 | **路径 A**：Bash command hooks + 共享 Bash core。不引入 Node.js runtime | Codex hooks 支持 `type: "command"`；双 runtime 会形成双测试矩阵；首期不需要 Node.js |
-| Level 1 verify 行为 | **路径 B**：写入 `.harness/logs/verification.ndjson`，不创建临时 feature，不修改 feature status | 项目级验证结果应持久化但不与 feature 混淆；升级到 Level 2 后可由用户显式关联 |
+| 决策 | 结论 |
+|------|------|
+| Codex adapter 投入深度 | **路径 A**：Bash command hooks + 共享 Bash core。不引入 Node.js runtime |
+| Level 1 verify 行为 | **路径 B**：写入 `.harness/logs/runs/<run_id>.ndjson`，不创建临时 feature，不修改 feature status |
+| Capability 模型 | **累积 maturity**：Level 2 ⊃ Level 1 ⊃ Level 0 |
+| Evidence 模型 | **Per-run immutable NDJSON log**：`run_started` → `command_completed` × N → `run_completed \| run_failed \| run_aborted` |
 
 ---
 
-## v2 → v3 变更摘要
+## v3 → v4 变更摘要
 
-| # | 变更 | 涉及章节 |
-|---|------|---------|
-| 1 | 删除 CODEX.md 作为 Codex 知识入口。Codex 默认使用 AGENTS.md | 全文 |
-| 2 | Codex adapter 改为纯 Bash command hooks，删除全部 Node.js .mjs 代码和引用 | 4.2, 4.3, 5.2, 7 |
-| 3 | 区分"通用语义"（MUST）和"首期 runtime 环境"（默认实现，可替换） | 2, 3 |
-| 4 | Capability level 改为能力判定，不再是固定文件套餐 | 5.1 |
-| 5 | 新增权威状态层级：registry → log → dashboard → hooks | 5.5 |
-| 6 | 新增 Architecture Invariant：adapter 不得包含业务语义 | 5.6 |
-| 7 | 新增安全模型 | 8 |
-| 8 | 并发设计细化：run 生命周期、NDJSON 追加语义、incomplete run 识别 | 6 |
-| 9 | 新增 Level 1 verification ndjson 完整 schema | 5.4 |
-| 10 | 新增 verification plan 灵活性：detected/configured/confirmed/executed | 5.3 |
-| 11 | 新增 Level 1 → Level 2 迁移路径 | 9.2 |
-| 12 | 新增向后兼容策略（读取兼容、写入新格式） | 9.1 |
-| 13 | Audit 改为能力评估，不再按固定文件名机械评分 | 5.7 |
-| 14 | 全文使用 MUST/SHOULD/MAY 标记约束强度 | 全文 |
-| 15 | 新增 Claude Code / Codex adapter contract 对比表 | 5.2 |
-| 16 | 扩展测试矩阵：project diversity, failure, migration | 11 |
-| 17 | 新增 non-goals | 13 |
-| 18 | 新增全文一致性检查结果 | 附录 C |
+| # | v3 问题 | v4 修正 |
+|---|---------|---------|
+| 1 | 三种冲突的 evidence 数据模型（flat record、单行 run、多事件） | 统一为 canonical per-run NDJSON event log（`run_started` / `command_completed` / `run_completed \| run_failed \| run_aborted`）。Feature registry 只存 run association，不复制 evidence |
+| 2 | `command_source` 混入 `executed` 状态 | 拆分为 `command_origin` (configured/detected) + `confirmation` (not_required/pending/confirmed/rejected) + `execution_status` (not_started/running/completed/failed/aborted) |
+| 3 | Level 1 允许 0 verification steps 时 `overall_result: "passed"` | 0 required steps → `no_checks`。至少需要一个实际执行的 required step |
+| 4 | NDJSON 并发追加依赖 PIPE_BUF 推断和 "temp+rename per record" | Per-run immutable log：`.harness/logs/runs/<run_id>.ndjson`。不同 run_id = 不同文件，零竞争 |
+| 5 | Registry CAS 仅用 `last_updated` 比较，存在 TOCTOU | 重新设计：lock + re-read + hash compare + atomic rename。版本号使用 content hash |
+| 6 | Evidence staleness 仅检查 HEAD match | 增加 `workspace_fingerprint`（dirty tree 检测）+ `config_sha256`（配置变更检测） |
+| 7 | Codex 同时生成 hooks.json 和 config.toml | 按安装模式选择唯一配置来源：plugin → `hooks/hooks.json`，repo-local → `.codex/hooks.json`，user inline → `~/.codex/config.toml` |
+| 8 | 声明了 unsupported 的 `has_notification_hook`, `has_checkpoint_hook` | 删除。使用官方事件集合。PLUGIN_ROOT/PLUGIN_DATA 首选，CLAUDE_PLUGIN_ROOT 为兼容回退 |
+| 9 | Hook fail-open 统一要求 `{"continue": true}`，但 Codex 部分事件不接受该字段 | Core 返回中立 outcome。Adapter 根据 host + event 映射到合法协议格式 |
+| 10 | Level 模型同时暗示累积和独立存在 | 明确为累积 maturity：Level 2 ⊃ Level 1 ⊃ Level 0 |
 
 ---
 
 ## 目录
 
-1. [Semantic Core Invariants（不可变语义核心）](#1-semantic-core-invariants不可变语义核心)
-2. [通用语义 vs 首期 Runtime 环境](#2-通用语义-vs-首期-runtime-环境)
-3. [合理边界](#3-合理边界)
-4. [架构方案：Core/Adapter Architecture](#4-架构方案-coreadapter-architecture)
-5. [推荐方案详细设计](#5-推荐方案详细设计)
-6. [并发与 Run 生命周期](#6-并发与-run-生命周期)
-7. [安全模型](#7-安全模型)
-8. [向后兼容与数据迁移](#8-向后兼容与数据迁移)
-9. [Level 1 → Level 2 迁移路径](#9-level-1--level-2-迁移路径)
-10. [分阶段实施计划](#10-分阶段实施计划)
-11. [测试矩阵](#11-测试矩阵)
-12. [风险与未验证假设](#12-风险与未验证假设)
-13. [Non-Goals](#13-non-goals)
-14. [附录](#14-附录)
+1. [Semantic Core Invariants](#1-semantic-core-invariants)
+2. [Canonical Evidence Data Model](#2-canonical-evidence-data-model)
+3. [通用语义 vs 首期 Runtime](#3-通用语义-vs-首期-runtime)
+4. [Capability Maturity Model](#4-capability-maturity-model)
+5. [Architecture: Core/Adapter](#5-architecture-coreadapter)
+6. [Registry Locking Protocol](#6-registry-locking-protocol)
+7. [Run Log Concurrency Protocol](#7-run-log-concurrency-protocol)
+8. [Passing Eligibility](#8-passing-eligibility)
+9. [Evidence Staleness](#9-evidence-staleness)
+10. [Verification Plan & Command Source](#10-verification-plan--command-source)
+11. [Hook Fail-Open Contract](#11-hook-fail-open-contract)
+12. [Codex Adapter Design](#12-codex-adapter-design)
+13. [安全模型](#13-安全模型)
+14. [向后兼容与数据迁移](#14-向后兼容与数据迁移)
+15. [Level 1 → Level 2 迁移](#15-level-1--level-2-迁移)
+16. [分阶段实施计划](#16-分阶段实施计划)
+17. [测试矩阵](#17-测试矩阵)
+18. [风险与未验证假设](#18-风险与未验证假设)
+19. [Non-Goals](#19-non-goals)
+20. [附录](#20-附录)
 
 ---
 
-## 1. Semantic Core Invariants（不可变语义核心）
+## 1. Semantic Core Invariants
 
-以下规则是 harness-companion 的 **MUST-level invariants**。任何 platform adapter、runtime 实现、未来版本都 MUST 遵守。违反任一条即破坏 correctness。
+以下规则 MUST 被所有 platform adapter 和 runtime 实现遵守。违反任一条即破坏 correctness。
 
 ### 1.1 Evidence Schema
 
-每条 evidence record MUST 包含以下字段：
+Evidence 以 per-run immutable NDJSON log 存储。每条 event 是独立的 NDJSON 行。Canonical schema 见第 2 节。
 
-| 字段 | 类型 | 语义 |
-|------|------|------|
-| `schema_version` | integer | evidence schema 版本号 |
-| `run_id` | string \| null | 本次 verification run 的唯一标识。`null` 仅用于 legacy 迁移 |
-| `command_id` | string | 执行的 verification command 的 id |
-| `command` | string[] | 实际执行的命令（argv 数组） |
-| `exit_code` | integer | 进程退出码 |
-| `started_at` | string (ISO 8601) | 命令开始时间 |
-| `duration_ms` | integer | 执行耗时（毫秒） |
-| `commit` | string \| null | VCS revision（不可获得时为 null） |
-| `working_tree_state` | string | `clean` / `dirty` / `no_git` |
-| `command_source` | string | `configured` / `detected` / `confirmed` / `executed`（命令来源） |
-
-### 1.2 Passing Eligibility（Level 2 专属）
-
-`is_eligible_for_passing(feature_id)` MUST 满足全部条件：
-
-1. **Non-empty structured evidence**：feature 的 evidence records 非空
-2. **Latest run only**：最新 run 由 evidence 数组的**最后一个非 null run_id 的 structured record** 决定。数组位置 = 时序
-3. **Single-run integrity**：只有与最新 run 共享 `run_id` 的 records 参与计算
-4. **All exit_code == 0**：参与计算的全部 records exit_code MUST 为 0
-5. **Full coverage**：参与计算的 records 的 `command_id` 集合 MUST 覆盖 config 中所有 `required_for_passing != false` 的命令
-6. **HEAD match**（git 项目）：最新 run 的 commit MUST 等于当前 HEAD
-7. **No cross-run cobbling**：不同 run_id 的 records 不得组合
-
-### 1.3 Feature State Machine（Level 2 专属）
+### 1.2 Feature State Machine（Level 2）
 
 状态集合：`not_started`, `in_progress`, `blocked`, `passing`, `unverified`, `deprecated`
 
-合法 transition（MUST 显式枚举）：
+合法 transition（MUST 显式枚举，未列出即拒绝）：
 
 | from | to | 条件 |
 |------|----|------|
 | `not_started` | `in_progress` | WIP limit 未超 |
 | `not_started` | `blocked` | — |
-| `in_progress` | `passing` | `is_eligible_for_passing()` 返回 true |
+| `in_progress` | `passing` | `is_eligible_for_passing()` 返回 true（见第 8 节） |
 | `in_progress` | `blocked` | — |
 | `in_progress` | `unverified` | `--override` 提供 reason |
 | `blocked` | `in_progress` | WIP limit 未超 |
@@ -112,197 +87,830 @@
 | `unverified` | `deprecated` | — |
 | any | `deprecated` | — |
 
-未列出的 transition MUST 被拒绝。
-
-### 1.4 Fail-Closed 语义
-
-以下场景 MUST exit non-zero，MUST NOT 静默成功：
+### 1.3 Fail-Closed 语义
 
 | 场景 | Exit code |
 |------|-----------|
 | jq 不可用 | 2 |
 | `.harness/config.json` 不存在（Level 1+） | 2 |
-| 验证命令不存在 | 1（该 step 的 exit_code = 127） |
-| `replay_required`（所有 evidence 的 run_id 为 null） | 2 |
-| CAS 冲突超过最大重试次数 | 4 |
+| 验证命令二进制不存在 | 该 step exit_code = 127，run status = `run_failed` |
+| 所有 evidence 的 run_id 为 null（Level 2） | 2 |
+| Registry lock 获取失败（timeout） | 5 |
+| Missing terminal event in log | passing eligibility 返回 false |
+| Multiple terminal events in log | passing eligibility 返回 false（fail-closed） |
+| Association 指向不存在的 run log | passing eligibility 返回 false |
+| Association 指向损坏的 run log（不可解析） | passing eligibility 返回 false |
+| 0 required steps 执行 | overall_result = `no_checks`, not `passed` |
 
-### 1.5 Hook Fail-Open
+### 1.4 原子写入
 
-Hook 脚本 MUST 在失败时返回 `{"continue": true}`。Hook 失败 MUST NOT 阻塞 agent session。
+所有 mutation（registry、config）MUST 通过 temp file + rename。见第 6 节锁定协议。
 
-### 1.6 原子写入
+### 1.5 Architecture Invariant：Adapter 不得包含业务语义
 
-所有 mutation（registry、log、config）MUST 通过原子写入（temp file + rename）。MUST NOT 原地覆盖。
+以下逻辑 MUST 只存在于 `core/`。任何 adapter MUST NOT 包含或重新实现：
+- Feature 状态机 transition
+- WIP limit 判定
+- Passing eligibility 计算（第 8 节伪代码）
+- Evidence staleness 判定（第 9 节）
+- run_id 生成或验证
 
-### 1.7 Override 审计
-
-每次 `--override` bypass MUST 记录 `{by, at, reason, missing_evidence[]}`。
+Adapter 的允许职责（MUST NOT 超出）：
+1. Host 事件映射（接收 platform 输入 → 环境变量 → 调用 core）
+2. 输入规范化（平台特定路径、JSON 字段名差异）
+3. 调用 core（通过环境变量）
+4. 输出转换（core 中立 outcome → platform hook 协议格式，见第 11 节）
+5. Host-specific 安装和降级
 
 ---
 
-## 2. 通用语义 vs 首期 Runtime 环境
+## 2. Canonical Evidence Data Model
 
-### 2.1 分层模型
+### 2.1 Per-Run Immutable Log
+
+每个 verification run 写入独立文件：
+
+```
+.harness/logs/runs/<run_id>.ndjson
+```
+
+文件是 immutable NDJSON：创建后只追加，run 终止后绝不修改。
+
+### 2.2 Event Types
+
+#### `run_started` — 每个 run 的第一个 event
+
+```json
+{
+  "event": "run_started",
+  "schema_version": 2,
+  "run_id": "20260731T151257Z-12345-32767",
+  "started_at": "2026-07-31T15:12:57Z",
+  "project_root": "/abs/path/to/project",
+  "vcs_revision": "abc1234def56",
+  "vcs_revision_source": "git",
+  "workspace_fingerprint": "sha256:6dcd4ce...",
+  "config_sha256": "sha256:abcd1234...",
+  "required_command_ids": ["typecheck", "unit-test"],
+  "capability_level": 1,
+  "feature_id": null
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `workspace_fingerprint` | 工作区状态指纹。clean tree → `"clean"`；dirty tree → `"sha256:<hash of git diff HEAD>"`；无 VCS → `"no_git"` |
+| `config_sha256` | `.harness/config.json` 的 SHA-256。用于检测配置变更后的 evidence staleness |
+| `required_command_ids` | 本次 run 计划执行的 required command id 列表（`required_for_passing != false`） |
+| `feature_id` | Level 2 时关联的 feature id。Level 1 时为 null |
+
+#### `command_completed` — 每个 verification step 完成后
+
+```json
+{
+  "event": "command_completed",
+  "run_id": "20260731T151257Z-12345-32767",
+  "command_id": "typecheck",
+  "command": ["npx", "tsc", "--noEmit"],
+  "command_origin": "configured",
+  "confirmation": "not_required",
+  "exit_code": 0,
+  "started_at": "2026-07-31T15:12:57Z",
+  "duration_ms": 12400,
+  "log_artifact": ".harness/logs/runs/20260731T151257Z-12345-32767/typecheck.log",
+  "log_sha256": "sha256:efgh5678..."
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `command_origin` | `configured`（用户显式配置）或 `detected`（从项目 manifest 探测） |
+| `confirmation` | `not_required`（origin=configured 时）、`pending`、`confirmed`、`rejected` |
+
+#### `run_completed` — 全部 required commands 通过
+
+```json
+{
+  "event": "run_completed",
+  "run_id": "20260731T151257Z-12345-32767",
+  "completed_at": "2026-07-31T15:13:12Z",
+  "overall_result": "passed",
+  "total_commands": 2,
+  "passed_commands": 2,
+  "failed_commands": 0,
+  "skipped_commands": 0
+}
+```
+
+#### `run_failed` — 至少一个 required command 失败
+
+```json
+{
+  "event": "run_failed",
+  "run_id": "20260731T151257Z-12345-32767",
+  "completed_at": "2026-07-31T15:13:12Z",
+  "overall_result": "failed",
+  "total_commands": 2,
+  "passed_commands": 1,
+  "failed_commands": 1,
+  "skipped_commands": 0,
+  "failed_command_ids": ["unit-test"]
+}
+```
+
+#### `run_aborted` — 外部中断（SIGTERM、超时等）
+
+```json
+{
+  "event": "run_aborted",
+  "run_id": "20260731T151257Z-12345-32767",
+  "completed_at": "2026-07-31T15:13:02Z",
+  "overall_result": "aborted",
+  "abort_reason": "timeout",
+  "total_commands": 2,
+  "passed_commands": 1,
+  "failed_commands": 0,
+  "skipped_commands": 1
+}
+```
+
+### 2.3 Terminal Event Rules
+
+- 每个 run log MUST 以恰好一个 terminal event 结束：`run_completed`、`run_failed` 或 `run_aborted`
+- 存在 0 个 terminal event → incomplete run → passing eligibility MUST 返回 false
+- 存在 ≥2 个 terminal event → corrupted log → passing eligibility MUST 返回 false（fail-closed）
+- `run_started` 后没有 `command_completed` → incomplete run → MUST 退出前写入 `run_aborted`
+- 0 required steps → overall_result SHALL 为 `no_checks`。MUST NOT 为 `passed`
+
+### 2.4 Feature Association Schema（Level 2）
+
+Feature registry 不复制 evidence。只保存 association：
+
+```json
+{
+  "id": "feature-001",
+  "status": "passing",
+  "evidence_associations": [
+    {
+      "run_id": "20260731T151257Z-12345-32767",
+      "associated_at": "2026-07-31T15:14:00Z",
+      "associated_by": "user"
+    }
+  ]
+}
+```
+
+`is_eligible_for_passing()` 通过 `run_id` 查询 canonical log file 获取 evidence。见第 8 节伪代码。
+
+---
+
+## 3. 通用语义 vs 首期 Runtime
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  Adapter Layer（每个 platform 不同）                      │
-│  - Hook 事件映射                                         │
-│  - 输入规范化、输出转换                                    │
-│  - Host-specific 安装和降级                               │
+│  - Hook 事件映射 → 调用 core                              │
+│  - 输入规范化、输出转换（中立 outcome → host 协议）         │
+│  - Host-specific 安装、降级、trust 流程                   │
 ├─────────────────────────────────────────────────────────┤
-│  Semantic Core（MUST — 通用、不依赖任何 platform/runtime）  │
+│  Semantic Core（MUST — 通用）                             │
 │  - 第 1 节全部 invariants                                 │
-│  - Capability contracts（Level 0/1/2）                   │
-│  - 权威状态层级                                          │
-│  - Evidence schema                                       │
-│  - 安全边界                                              │
+│  - Evidence event schema（第 2 节）                       │
+│  - Capability maturity 判定（第 4 节）                    │
+│  - Passing eligibility（第 8 节）                        │
+│  - Evidence staleness（第 9 节）                          │
+│  - Registry locking（第 6 节）                            │
+│  - 安全边界（第 13 节）                                   │
 ├─────────────────────────────────────────────────────────┤
 │  Reference Runtime（首期实现，可替换）                      │
 │  - Language: bash 3.2+                                   │
-│  - JSON processor: jq 1.6+                               │
+│  - JSON: jq 1.6+                                         │
 │  - Atomic write: mktemp + mv                             │
+│  - Lock: flock (Linux/macOS) / mkdir (Git Bash fallback) │
+│  - Hash: sha256sum / shasum -a 256                       │
 │  - Unique ID: date-PID-RANDOM                            │
-│  - File hash: sha256sum / shasum -a 256                  │
-│  - Path normalization: cygpath / sed                     │
-│  - Concurrency: CAS + append-only NDJSON                 │
 └─────────────────────────────────────────────────────────┘
 ```
 
-### 2.2 关键区分
-
 | 概念 | 含义 | 约束级别 |
 |------|------|---------|
-| **通用语义** | 第 1 节的全部 invariants、capability contracts、权威状态层级、evidence schema | MUST — 所有 platform 和 runtime 实现都必须遵守 |
-| **首期 Reference Runtime** | bash 3.2+ + jq 1.6+ 的具体实现 | 默认实现。future runtime MAY 完全替换 |
-| **首期支持环境** | Linux bash 5.x, macOS bash 3.2+, Windows Git Bash, WSL | 已验证环境。其他环境 MAY 在后续版本支持 |
-| **不支持** | Windows cmd.exe, PowerShell native, 无 jq 环境 | 明确标记为 unsupported |
-
-"通用"不等于"所有平台已实现"。它意味着 semantic core 不依赖特定 platform 或 runtime，且 adapter 接口设计允许新增 platform 支持而不修改 core。
+| **通用语义** | invariants + event schema + passing 逻辑 + staleness + lock 协议 | MUST |
+| **首期 Reference Runtime** | bash + jq 实现 | 默认实现。future runtime MAY 完全替换 |
+| **首期支持环境** | Linux bash 5.x, macOS bash 3.2+, Windows Git Bash / WSL | 已验证环境 |
+| **不支持** | cmd.exe, PowerShell native, 无 jq 环境 | 明确标记为 unsupported |
 
 ---
 
-## 3. 合理边界
+## 4. Capability Maturity Model
 
-### 3.1 支持矩阵
+Level 采用**累积成熟度模型**：Level 2 ⊃ Level 1 ⊃ Level 0。高层级包含低层级的全部能力。
 
-| 维度 | 首期支持 | 约束级别 |
-|------|---------|---------|
-| Agent 平台 | Claude Code, Codex | MUST |
-| 操作系统 | Linux, macOS, Windows (Git Bash / WSL) | 首期 MUST |
-| Shell | bash 3.2+ (POSIX sh 子集) | 首期 MUST |
-| 项目类型 | Node/TS, Python, Rust/Go, Make/just, 文档项目, monorepo, 无 Git | SHOULD（通过 verification plan 灵活性实现） |
-| VCS | Git (clean/dirty), 无 VCS | MUST |
-| 工作模式 | Level 0 (knowledge only), Level 1 (project verify), Level 2 (feature-driven) | MUST |
+### Level 0：Knowledge Guidance
 
-### 3.2 明确排除
+**能力**：Agent 可发现项目知识和操作指令。
 
-| 排除项 | 理由 |
-|--------|------|
-| Windows cmd.exe / PowerShell native | 核心依赖 bash。Git Bash / WSL 是前提条件 |
-| 无 jq 环境 | jq 是 reference runtime 的必需依赖。future runtime MAY 移除 |
-| 自动将配置外命令推断为 verification plan（未确认时） | 安全边界。不得静默执行高成本或有副作用的命令 |
-| 自动推断 Level 1 历史 run 与 feature 的关联 | 升级到 Level 2 后仅允许用户显式关联 |
+**判定**：存在 adapter 声明的 knowledge_entry 文件，或等效的知识指引机制。
+
+**可用**：`/harness:status`（基础 Knowledge），`/harness:audit`（Knowledge 子系统）
+
+### Level 1：Project Verification
+
+**能力**（含 Level 0 全部 +）：
+
+- 可发现 verification plan（`.harness/config.json` 或等效）
+- 可执行 verification commands
+- 结果写入 per-run immutable log：`.harness/logs/runs/<run_id>.ndjson`
+- 至少一个 `required_for_passing != false` 的 command 实际执行
+- Status 面板报告最近 run 状态
+
+**判定**：Level 0 + verification plan 存在且可执行。
+
+**可用**：Level 0 + `/harness:verify`（项目级）
+
+**约束**：
+- MUST NOT 创建/修改 feature registry
+- `overall_result` 仅反映项目级 run 状态
+- Level 1 的 `passed` MUST NOT 被解释为任何 feature 的 passing
+
+### Level 2：Feature-Driven Development
+
+**能力**（含 Level 1 全部 +）：
+
+- Feature registry（`feature_list.json` 或等效）
+- Feature state machine（1.2 节）
+- Evidence-to-feature association（2.4 节）
+- Passing eligibility 基于 canonical log（第 8 节）
+- WIP tracking
+
+**判定**：Level 1 + feature registry 存在。
+
+**可用**：全部 6 个命令
+
+### 能力总结
+
+| 能力 | L0 | L1 | L2 |
+|------|:--:|:--:|:--:|
+| Knowledge guidance | ✅ | ✅ | ✅ |
+| 可发现 verification plan | — | ✅ | ✅ |
+| Per-run immutable evidence log | — | ✅ | ✅ |
+| ≥1 required step 执行 | — | ✅ | ✅ |
+| Feature registry | — | — | ✅ |
+| Feature state machine | — | — | ✅ |
+| Evidence association | — | — | ✅ |
+| WIP tracking | — | — | ✅ |
+| `/harness:status` | ✅ | ✅ | ✅ |
+| `/harness:verify` | — | ✅ | ✅ |
+| `/harness:feature` | — | — | ✅ |
+| `/harness:audit` | ✅ | ✅ | ✅ |
 
 ---
 
-## 4. 架构方案：Core/Adapter Architecture
+## 5. Architecture: Core/Adapter
 
-### 4.1 目录结构
+### 5.1 目录结构
 
 ```
 harness-companion/
-├── core/                              # Semantic core + reference bash runtime
+├── core/
 │   ├── lib/
-│   │   ├── state-machine.sh           # 状态机（纯逻辑）
-│   │   ├── evidence.sh                # evidence 构建 + staleness
-│   │   ├── passing.sh                 # passing eligibility（run_id null 处理）
-│   │   ├── atomic-write.sh            # mktemp+mv
-│   │   ├── json-helpers.sh            # jq 封装
-│   │   └── concurrency.sh             # CAS + NDJSON append
-│   ├── harness-feature.sh             # feature CRUD
-│   ├── harness-verify.sh              # config-driven 验证链
-│   ├── harness-status.sh              # 健康面板（派生视图）
-│   └── harness-audit.sh               # 审计（能力评估）
+│   │   ├── state-machine.sh
+│   │   ├── evidence.sh              # run log 写入（per-run NDJSON）
+│   │   ├── passing.sh               # passing eligibility（查询 canonical log）
+│   │   ├── staleness.sh             # workspace_fingerprint + config_sha256 检测
+│   │   ├── lock-registry.sh         # registry locking protocol
+│   │   ├── atomic-write.sh
+│   │   └── json-helpers.sh
+│   ├── harness-feature.sh
+│   ├── harness-verify.sh
+│   ├── harness-status.sh
+│   └── harness-audit.sh
 │
 ├── adapters/
 │   ├── claude-code/
-│   │   ├── hooks/                     # Bash hooks
-│   │   │   ├── session-start.sh
-│   │   │   └── stop-handoff.sh
-│   │   ├── templates/                 # Claude 专属模板
-│   │   │   ├── CLAUDE.md
-│   │   │   └── claude-progress.md
+│   │   ├── hooks/session-start.sh, stop-handoff.sh
+│   │   ├── templates/CLAUDE.md, claude-progress.md
 │   │   ├── install.sh
 │   │   └── adapter.conf
 │   │
 │   └── codex/
-│       ├── hooks/                     # Bash hooks (Codex type: "command")
+│       ├── hooks/
 │       │   ├── session-start.sh
-│       │   ├── session-start.cmd      # Windows commandWindows 备选
+│       │   ├── session-start.cmd    # commandWindows 备选
 │       │   ├── stop-handoff.sh
 │       │   └── stop-handoff.cmd
-│       ├── hooks.json                 # Codex hooks 配置
-│       ├── templates/                 # Codex 专属模板
-│       │   ├── AGENTS.md              # Codex 默认项目指令文件
-│       │   └── codex-progress.md
+│       ├── templates/AGENTS.md, codex-progress.md
 │       ├── install.sh
 │       └── adapter.conf
 │
-├── templates/                         # 共享项目模板（平台无关）
+├── templates/                       # 共享（平台无关）
 │   ├── feature_list.json
 │   ├── .harness/
 │   │   ├── config.schema.json
-│   │   ├── config.json.node.example
-│   │   ├── config.json.python.example
-│   │   ├── config.json.rust.example
-│   │   └── config.json.generic.example
-│   ├── init.sh
-│   └── AGENTS.md                      # 通用 agent 操作手册
+│   │   └── config.json.*.example
+│   └── init.sh
 │
 ├── tests/
-│   ├── core/                          # 核心语义测试
-│   ├── adapters/                      # adapter contract tests
-│   │   ├── claude-code/
-│   │   └── codex/
-│   └── golden/                        # golden tests
+│   ├── core/
+│   ├── adapters/
+│   └── golden/
 │
 └── VERSION
 ```
 
-### 4.2 adapter.conf 格式
+### 5.2 Adapter Contract Tables
 
-**Claude Code adapter**（`adapters/claude-code/adapter.conf`）：
+#### Claude Code Adapter
 
-```ini
-name=claude-code
-display_name=Claude Code
-protocol_version=1
+| 职责 | 实现 | 约束 |
+|------|------|------|
+| Hook 事件映射 | Bash → `~/.claude/settings.json` | 第 11 节 fail-open contract |
+| SessionStart | 调用 `core/harness-status.sh` → 输出 Claude-specific JSON | MUST fail-open |
+| Stop | 调用 core → 输出 Claude-specific JSON | SHOULD 提示不阻塞 |
+| 模板 | `CLAUDE.md`, `claude-progress.md` | 默认值 |
+| 安装 | `~/.claude/skills/harness-companion/` | MUST 备份 settings.json |
 
-# File mapping
-knowledge_entry=CLAUDE.md
-agent_entry=AGENTS.md
-progress_file=claude-progress.md
+#### Codex Adapter
 
-# Capabilities
-has_session_start_hook=true
-has_stop_hook=true
-has_user_prompt_submit_hook=true
-has_pre_tool_use_hook=true
-has_post_tool_use_hook=true
-has_pre_compact_hook=true
+| 职责 | 实现 | 约束 |
+|------|------|------|
+| Hook 事件映射 | Bash `type: "command"` | 第 11 节 fail-open contract per event |
+| 配置来源 | 按安装模式唯一（第 12.3 节） | MUST NOT 同一层重复注册 |
+| SessionStart | 调用 core → 输出 Codex event-specific JSON | MUST fail-open |
+| Stop | 调用 core → 输出 Codex event-specific JSON | SHOULD 提示不阻塞 |
+| Windows 备选 | `commandWindows` → `.cmd` 脚本 | Git Bash 不可用时 |
+| 模板 | `AGENTS.md`, `codex-progress.md` | AGENTS.md 是 Codex 默认 |
+| 安装 | 按模式决定路径 | MUST 备份现有配置 |
+| 降级 | Hook disabled/untrusted/unavailable → explicit | MUST 说明原因和影响 |
 
-# Hook implementation
-hook_runtime=bash
-hook_directory=hooks
+---
 
-# Install target
-install_config_path=~/.claude/settings.json
-install_config_format=json
-install_skill_format=claude-skill
+## 6. Registry Locking Protocol
+
+### 6.1 问题
+
+v3 的 CAS 设计存在 TOCTOU：`last_updated` 比较和 atomic rename 之间有窗口。timestamp-based 版本号在分布式场景不准确。
+
+### 6.2 Protocol
+
+```
+REGISTRY_LOCK = .harness/.registry.lock
+REGISTRY_FILE = feature_list.json
+LOCK_TIMEOUT_S = 10
+
+update_registry(modification_fn):
+    // Step 1: Acquire lock
+    lock_fd = acquire_lock(REGISTRY_LOCK, timeout=LOCK_TIMEOUT_S)
+    if lock_fd == null:
+        exit 5  // lock_timeout
+    
+    // Step 2: Re-read under lock (NOT before lock)
+    current_content = read_file(REGISTRY_FILE)
+    current_hash = sha256(current_content)
+    
+    // Step 3: Apply modification
+    new_content = modification_fn(current_content)
+    if new_content == null:
+        // modification_fn rejected (e.g., invalid transition)
+        release_lock(lock_fd)
+        return error
+    
+    // Step 4: Write to temp + atomic rename (still under lock)
+    temp_file = REGISTRY_FILE + ".tmp." + pid
+    write_file(temp_file, new_content)
+    rename(temp_file, REGISTRY_FILE)   // atomic on same filesystem
+    
+    // Step 5: Release lock
+    release_lock(lock_fd)
+    return success
 ```
 
-**Codex adapter**（`adapters/codex/adapter.conf`）：
+### 6.3 Lock 实现（reference runtime）
+
+| Platform | 实现 |
+|----------|------|
+| Linux, macOS | `flock(2)` via `flock` command |
+| Windows Git Bash | `mkdir` 原子性作为 mutex（`mkdir .registry.lock 2>/dev/null` 成功 = 获取锁） |
+| 通用 fallback | `mkdir`-based mutex |
+
+### 6.4 Versioning
+
+- 不使用 `last_updated` timestamp 作为版本号
+- 使用 `content_hash`（SHA-256 of file content）作为版本标识
+- `content_hash` 存储在 registry JSON 的顶层字段
+- Lock 持有者在步骤 2 读取 `current_hash`，步骤 4 写入 `new_content`（包含更新后的 `content_hash`）
+
+### 6.5 Lock 协议测试
+
+```
+test_lock_timeout:
+    1. 进程 A 获取锁，sleep 15s
+    2. 进程 B 尝试获取锁（timeout=2s）
+    3. 断言: 进程 B exit 5 (lock_timeout)
+
+test_lock_no_lost_update:
+    1. 进程 A 获取锁，读取 registry (hash=H1)，修改 feature-1→passing
+    2. 进程 A 持有锁期间，进程 B 排队等待
+    3. 进程 A 写入 (hash=H2)，释放锁
+    4. 进程 B 获取锁，重新读取 registry (hash=H2，包含 A 的修改)
+    5. 进程 B 修改 feature-2→in_progress
+    6. 进程 B 写入 (hash=H3)
+    7. 断言: feature-1=passing AND feature-2=in_progress
+
+test_lock_crash_recovery:
+    1. 进程 A 获取锁，写入 temp 文件
+    2. 进程 A 在 rename 前 crash
+    3. 进程 B 获取锁（stale lock 检测：PID 存活检查）
+    4. 断言: registry 未被损坏
+    5. 断言: temp 文件被清理或忽略
+```
+
+---
+
+## 7. Run Log Concurrency Protocol
+
+### 7.1 设计原则
+
+**Per-run immutable log**：不同 run_id = 不同文件。零并发竞争。
+
+### 7.2 Protocol
+
+```
+RUN_LOG_DIR = .harness/logs/runs/
+
+write_run_event(run_id, event_json):
+    log_path = RUN_LOG_DIR + run_id + ".ndjson"
+    
+    // Within a single run, commands execute sequentially.
+    // No concurrent writes to the same run log.
+    append_line(log_path, event_json + "\n")
+    
+    // The file is created on first write.
+    // After the terminal event, the file MUST NOT be written again.
+```
+
+### 7.3 并发保证
+
+| 场景 | 保证 |
+|------|------|
+| 两个并发 run（不同 run_id） | 写入不同文件。零竞争 |
+| 同一 run 内多个 command | Command 顺序执行。单线程写入 |
+| Crash 后重试同一 feature | 新的 run_id = 新文件。旧文件保留 |
+| 两个 agent 并发 verify 同一 feature | 各自不同的 run_id → 不同文件 → 零竞争 |
+
+### 7.4 Incomplete Run 检测
+
+```
+is_run_complete(run_id):
+    log = read_all_lines(RUN_LOG_DIR + run_id + ".ndjson")
+    terminal_events = log.filter(e -> e.event in ["run_completed", "run_failed", "run_aborted"])
+    
+    if terminal_events.length == 0:
+        return {status: "incomplete", reason: "no_terminal_event"}
+    if terminal_events.length > 1:
+        return {status: "corrupted", reason: "multiple_terminal_events"}
+    return {status: "complete", terminal: terminal_events[0]}
+```
+
+### 7.5 Protocol Tests
+
+```
+test_concurrent_runs_different_files:
+    1. 启动 run A (run_id=RA): 写入 RA.ndjson
+    2. 同时启动 run B (run_id=RB): 写入 RB.ndjson
+    3. 断言: 两个文件均存在且完整
+    4. 断言: RA.ndjson 和 RB.ndjson 互不包含对方的数据
+
+test_same_run_sequential_commands:
+    1. 写入 run_started
+    2. 写入 command_completed (typecheck)
+    3. 写入 command_completed (unit-test)
+    4. 写入 run_completed
+    5. 断言: 文件有恰好 4 行，顺序正确
+
+test_no_terminal_event:
+    1. 写入 run_started
+    2. 写入 command_completed
+    3. (不写入 terminal event)
+    4. 断言: is_run_complete() = {status: "incomplete"}
+
+test_multiple_terminal_events:
+    1. 写入 run_started + run_completed
+    2. 追加 run_completed (第二个)
+    3. 断言: is_run_complete() = {status: "corrupted"}
+    4. 断言: passing eligibility = false
+
+test_0_required_steps_not_passed:
+    1. 写入 run_started (required_command_ids=[])
+    2. 写入 run_completed (overall_result="no_checks", total_commands=0)
+    3. 断言: overall_result != "passed"
+    4. 断言: passing eligibility = false
+```
+
+---
+
+## 8. Passing Eligibility
+
+### 8.1 伪代码（Level 2 调用）
+
+```
+function is_eligible_for_passing(feature_id, feature_registry, config):
+    // Step 1: Find association
+    assoc = feature_registry.features
+        .find(f => f.id == feature_id)
+        ?.evidence_associations
+        ?.last()
+    
+    if assoc == null:
+        return {eligible: false, reason: "no_evidence_association"}
+    
+    run_id = assoc.run_id
+    log_path = ".harness/logs/runs/" + run_id + ".ndjson"
+    
+    // Step 2: Run log must exist and be parseable
+    if !file_exists(log_path):
+        return {eligible: false, reason: "run_log_missing", run_id: run_id}
+    
+    events = parse_ndjson(log_path)
+    if events == null:
+        return {eligible: false, reason: "run_log_corrupted", run_id: run_id}
+    
+    // Step 3: Exactly one terminal event
+    terminal_events = events.filter(e -> e.event in
+        ["run_completed", "run_failed", "run_aborted"])
+    
+    if terminal_events.length == 0:
+        return {eligible: false, reason: "run_incomplete", run_id: run_id}
+    if terminal_events.length > 1:
+        return {eligible: false, reason: "run_log_corrupted_multiple_terminals",
+                run_id: run_id}
+    
+    terminal = terminal_events[0]
+    
+    // Step 4: Terminal must be run_completed with passed
+    if terminal.event != "run_completed":
+        return {eligible: false, reason: "run_not_passed",
+                run_id: run_id, terminal_event: terminal.event}
+    if terminal.overall_result != "passed":
+        return {eligible: false, reason: "overall_result_not_passed",
+                run_id: run_id, overall_result: terminal.overall_result}
+    
+    // Step 5: At least one required step executed
+    run_started = events.find(e -> e.event == "run_started")
+    if run_started.required_command_ids.length == 0:
+        return {eligible: false, reason: "no_required_steps", run_id: run_id}
+    
+    // Step 6: Evidence staleness — workspace_fingerprint
+    if run_started.workspace_fingerprint != "clean":
+        // Evidence was generated on a dirty tree. Reject unless the
+        // current dirty state matches the fingerprint exactly.
+        current_fingerprint = compute_workspace_fingerprint()
+        if current_fingerprint != run_started.workspace_fingerprint:
+            return {eligible: false, reason: "workspace_changed_since_run",
+                    run_id: run_id,
+                    run_fingerprint: run_started.workspace_fingerprint,
+                    current_fingerprint: current_fingerprint}
+    
+    // Step 7: Evidence staleness — config_sha256
+    current_config_hash = sha256_file(".harness/config.json")
+    if run_started.config_sha256 != current_config_hash:
+        return {eligible: false, reason: "config_changed_since_run",
+                run_id: run_id,
+                run_config_sha256: run_started.config_sha256,
+                current_config_sha256: current_config_hash}
+    
+    // Step 8: Coverage — all required commands represented
+    completed_ids = events
+        .filter(e -> e.event == "command_completed")
+        .map(e -> e.command_id)
+    required_ids = run_started.required_command_ids
+    missing = required_ids.filter(id -> !completed_ids.contains(id))
+    if missing.length > 0:
+        return {eligible: false, reason: "missing_command_coverage",
+                run_id: run_id, missing: missing}
+    
+    // Step 9: All command exit codes must be 0
+    failed = events
+        .filter(e -> e.event == "command_completed" && e.exit_code != 0)
+    if failed.length > 0:
+        return {eligible: false, reason: "command_failed",
+                run_id: run_id,
+                failed_commands: failed.map(e -> e.command_id)}
+    
+    // Step 10: HEAD match (git repos only)
+    if run_started.vcs_revision != null && is_git_repo():
+        current_head = git("rev-parse --short=12 HEAD")
+        if run_started.vcs_revision != current_head:
+            return {eligible: false, reason: "vcs_moved_since_run",
+                    run_id: run_id,
+                    run_revision: run_started.vcs_revision,
+                    current_head: current_head}
+    
+    return {eligible: true, run_id: run_id}
+```
+
+### 8.2 workspace_fingerprint 计算
+
+```
+compute_workspace_fingerprint():
+    if !is_git_repo():
+        return "no_git"
+    
+    if git("diff --quiet HEAD"):
+        return "clean"
+    
+    diff_content = git("diff HEAD")
+    return "sha256:" + sha256(diff_content)
+```
+
+---
+
+## 9. Evidence Staleness
+
+### 9.1 检测维度
+
+| 维度 | 方法 | 存储位置 |
+|------|------|---------|
+| VCS revision | `git rev-parse HEAD` | `run_started.vcs_revision` |
+| Workspace dirtiness | `workspace_fingerprint`（9.2 节） | `run_started.workspace_fingerprint` |
+| Config integrity | `config_sha256`（9.3 节） | `run_started.config_sha256` |
+
+### 9.2 Workspace Fingerprint
+
+```
+clean tree:  fingerprint = "clean"
+dirty tree:  fingerprint = "sha256:" + sha256(git diff HEAD)
+no git:      fingerprint = "no_git"
+```
+
+Passing eligibility 规则：
+
+| Run fingerprint | Current state | 结果 |
+|-----------------|---------------|------|
+| `"clean"` | clean | ✅ pass |
+| `"clean"` | dirty | ❌ stale（当前 dirty，但 run 执行时是 clean） |
+| `"sha256:<H>"` | `"sha256:<H>"` | ✅ pass（相同 dirty state） |
+| `"sha256:<H>"` | `"sha256:<H2>"` | ❌ stale（dirty 内容已变化） |
+| `"no_git"` | no_git | ✅ pass |
+
+### 9.3 Config Integrity
+
+`config_sha256` = SHA-256 of `.harness/config.json` content at run time.
+
+Passing eligibility MUST verify `run_started.config_sha256 == sha256(current_config)`。
+
+这防止了以下场景：
+- 用户在 run 后修改了 verification commands（删除、重排、增补）
+- 用户在 run 后修改了 `required_for_passing` 标记
+- 旧的 passing evidence 被误用于新的验证配置
+
+---
+
+## 10. Verification Plan & Command Source
+
+### 10.1 Command 元数据拆分
+
+每个 verification command 携带三个独立字段：
+
+| 字段 | 值 | 说明 |
+|------|-----|------|
+| `command_origin` | `configured` | 用户显式配置于 `.harness/config.json` |
+| | `detected` | 从项目 manifest 探测（package.json, Makefile 等） |
+| `confirmation` | `not_required` | origin=configured 时自动确认 |
+| | `pending` | detected 但等待用户确认 |
+| | `confirmed` | 用户已确认 |
+| | `rejected` | 用户拒绝 |
+| `execution_status` | `not_started` | 未执行 |
+| | `running` | 正在执行 |
+| | `completed` | 执行成功结束（exit_code 可能非 0） |
+| | `failed` | 执行异常（启动失败、超时等，非 exit_code 意义上的失败） |
+| | `aborted` | 外部中断 |
+
+### 10.2 探测行为约束
+
+| 规则 | 约束 |
+|------|------|
+| `detected` + `confirmation=pending` 的命令 MUST NOT 自动执行 | MUST |
+| 高成本命令（`npm install`, `docker build`）MUST NOT 被自动探测 | MUST |
+| 有副作用的命令（`publish`, `deploy`）MUST NOT 出现在 verification plan 除非用户显式配置 | MUST |
+| `command_origin` 和 `confirmation` 写入 `command_completed` event | MUST |
+| 0 required steps → `overall_result = "no_checks"` | MUST |
+
+### 10.3 0-Step 项目
+
+文档项目、数据项目、研究项目 MUST 能被 Level 1 检测，但：
+- 如果没有 `required_for_passing != false` 的 verification step，`overall_result` SHALL 为 `"no_checks"`
+- `"no_checks"` SHALL NOT 被解释为 `"passed"`
+- Status 面板 SHALL 区分 "上次验证通过（N steps）" 和 "无可用验证步骤"
+
+---
+
+## 11. Hook Fail-Open Contract
+
+### 11.1 分层责任
+
+```
+┌────────────────────────────────────────┐
+│  Adapter: 接收 hook 输入                │
+│  → 调用 core（环境变量）                 │
+│  → 获取 core 中立 outcome               │
+│  → 映射为 host-specific 协议输出         │
+│  → 错误处理: 生成合法协议格式              │
+├────────────────────────────────────────┤
+│  Core: 执行业务逻辑                      │
+│  → 返回中立 outcome JSON                 │
+│  → 不感知 host hook 协议格式              │
+│  → 异常时返回 error outcome              │
+└────────────────────────────────────────┘
+```
+
+### 11.2 Core Neutral Outcome Format
+
+Core 脚本 SHALL 输出以下 JSON 到 stdout：
+
+```json
+{
+  "status": "ok" | "error",
+  "error_code": null | "CONFIG_MISSING" | "JQ_MISSING" | "INTERNAL",
+  "message": "human-readable summary",
+  "payload": { ... }
+}
+```
+
+`payload` 内容由具体命令决定（status 面板数据、verification 结果等）。
+
+### 11.3 Adapter 映射规则
+
+**Claude Code adapter**：
+
+| Hook Event | Core Outcome | Adapter Output |
+|------------|-------------|----------------|
+| SessionStart | status="ok" | `{"continue":true, "hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"<payload>"}}` |
+| SessionStart | status="error" | `{"continue":true, "suppressOutput":true}` |
+| Stop | any | `{"continue":true, "systemMessage":"..."}` 或 `{"continue":true}` |
+
+**Codex adapter**：
+
+Codex hook 事件的输出协议各不相同，adapter MUST 根据事件类型选择合法格式：
+
+| Hook Event | Core Outcome | Adapter Output |
+|------------|-------------|----------------|
+| SessionStart | status="ok" | `{"continue":true, "hookSpecificOutput":{...}}` |
+| SessionStart | status="error" | `{"continue":true}` |
+| Stop | any | `{"continue":true}` |
+| PreToolUse | status="ok" | `{"continue":true, "hookSpecificOutput":{...}}` (if permissions supported) |
+| PreToolUse | status="error" | `{"continue":true}` |
+| PostToolUse | any | `{"continue":true}` |
+
+**规则**：
+- 如果 adapter 不确定某个 event 的合法协议格式，MUST 输出 `{"continue":true}` 并 suppressOutput
+- Adapter MUST NOT 为 "对称性" 在所有 event 上输出相同的结构
+- Codex 各 event 的 exact 输出字段名 MUST 在 Phase 3 prototype 中验证
+
+---
+
+## 12. Codex Adapter Design
+
+### 12.1 支持的 Hook Events（官方集合）
+
+基于 Codex 官方文档确认的 hook 事件：
+
+| Event | 是否用于 harness-companion |
+|-------|--------------------------|
+| `SessionStart` | ✅ 注入 status 摘要 |
+| `Stop` | ✅ 注入 handoff 提示 |
+| `UserPromptSubmit` | MAY（future：验证用户 prompt 内容） |
+| `PreToolUse` | MAY（future：工具调用前检查） |
+| `PostToolUse` | MAY（future：工具调用后日志） |
+| `PreCompaction` | MAY（future：压缩前保存上下文） |
+
+不在官方集合中的事件（如 `Notification`、`Checkpoint`）MUST NOT 出现在 `adapter.conf` 的能力标志中。
+
+### 12.2 环境变量
+
+| 变量 | 来源 | 说明 |
+|------|------|------|
+| `PLUGIN_ROOT` | Codex 原生 | 插件根目录。**首选** |
+| `PLUGIN_DATA` | Codex 原生 | 插件数据目录。**首选** |
+| `CLAUDE_PLUGIN_ROOT` | Codex 兼容层 | Claude Code 兼容性变量。**仅作为回退** |
+
+Adapter 脚本 MUST 优先使用 `PLUGIN_ROOT`/`PLUGIN_DATA`；仅在它们不存在时 fallback 到 `CLAUDE_PLUGIN_ROOT`。
+
+### 12.3 每层唯一配置来源
+
+Codex adapter 的 hook 注册 MUST NOT 在同一配置层重复注册。按安装模式选择**唯一**配置目标：
+
+| 安装模式 | 配置来源 | 文件路径 |
+|---------|---------|---------|
+| **Plugin**（`.codex-plugin/`） | `hooks.json` | `<plugin_root>/hooks/hooks.json` |
+| **Repo-local**（项目内 `.codex/`） | `hooks.json` | `<project>/.codex/hooks.json` |
+| **User inline**（全局配置） | `config.toml` | `~/.codex/config.toml` `[[hooks]]` 块 |
+
+规则：
+- 同一层 MUST NOT 同时生成 `hooks.json` 和 `config.toml hooks`
+- `install.sh` MUST 检测安装模式并写入对应的唯一配置
+- 如果检测到已有配置（任何格式），MUST 提示手工迁移而非覆盖
+
+### 12.4 Codex adapter.conf
 
 ```ini
 name=codex
@@ -310,690 +918,245 @@ display_name=Codex OS
 protocol_version=1
 
 # File mapping
-# Codex 默认项目指令文件是 AGENTS.md
+# Codex default project instruction file is AGENTS.md
 knowledge_entry=AGENTS.md
 progress_file=codex-progress.md
 
-# Capabilities (research-confirmed)
+# Capabilities (official event set only)
 has_session_start_hook=true
 has_stop_hook=true
 has_user_prompt_submit_hook=true
 has_pre_tool_use_hook=true
 has_post_tool_use_hook=true
 has_pre_compact_hook=true
-has_notification_hook=true
-has_checkpoint_hook=true
 
 # Hook implementation
-# Codex supports type: "command" — no Node.js required
 hook_runtime=bash
 hook_directory=hooks
-has_command_windows=true              # Windows commandWindows 备选
+has_command_windows=true              # commandWindows .cmd fallback
 
 # Degradation modes
-# hooks disabled / untrusted / unavailable → explicit invocation
 fallback_workflow=explicit
-windows_sandbox_degraded=true         # Codex Windows sandbox hooks MAY be unreliable
+windows_sandbox_degraded=true
 
-# Install target
-# Codex hooks configured in config.toml (TOML format, NOT JSON settings.json)
-install_config_path=~/.codex/config.toml
-install_config_format=toml
-# Also provide hooks.json for Codex hooks directory convention
-install_hooks_json=true
+# Install targets (one per mode, never combined)
+plugin_config_type=hooks_json
+repo_local_config_type=hooks_json
+user_inline_config_type=config_toml
 ```
-
-### 4.3 首个 Adapter 引入 Node.js runtime 的门槛
-
-当前决策：Codex adapter 使用 Bash command hooks（不引入 Node.js）。
-
-引入 Node.js runtime 的 MUST 满足的门槛（不因"对称性"或"理论可移植性"触发）：
-
-1. 经 prototype 验证，某个 Codex hook 行为的正确性**无法**由 Bash adapter 实现
-2. 该行为影响 core invariant 的验证（不是可选的增强功能）
-3. 经评估，修改 core 为 runtime-agnostic 的成本低于维护双 runtime
-
-这些条件未满足时，Codex adapter MUST 保持 Bash-only。
 
 ---
 
-## 5. 推荐方案详细设计
+## 13. 安全模型
 
-### 5.1 Capability Levels（能力判定，非文件套餐）
+### 13.1 Hook Trust
 
-Level 由**可用能力**决定，不由特定文件名或文件存在性判定。以下模板文件名是推荐默认值，但 SHOULD NOT 被硬编码为唯一判定条件。
+- Hook 运行项目内命令。Codex hooks MUST 在 untrusted 状态下降级为 explicit invocation
+- 未获信任时，MUST NOT 自动运行
 
-#### Level 0：Knowledge Guidance
-
-**能力**：
-- Agent 可发现并读取项目知识和操作指令
-- Status 面板可报告 Knowledge 子系统状态
-
-**判定**（满足任一即可）：
-- 项目根目录存在 adapter 声明的 knowledge_entry 文件（Claude: `CLAUDE.md`, Codex: `AGENTS.md`）
-- 或 agent 平台通过其他机制（如 plugin 配置的 `model_instructions_file`）提供了等效的知识指引
-
-**可用命令**：`/harness:status`（基础），`/harness:audit`（Knowledge 子系统）
-
-**MUST NOT**：
-- 强制要求特定文件名
-- 自动创建 feature registry
-
-#### Level 1：Project Verification（无 feature tracking）
-
-**能力**：
-- 发现并执行 verification plan
-- 将项目级验证结果持久化为结构化 evidence
-- Status 面板可报告最近验证状态
-
-**判定**：
-- 存在可发现的 verification plan（见 5.3 节），且
-- verification 命令可执行并产生可持久化的 evidence
-
-**数据存储**：`.harness/logs/verification.ndjson`（见 5.4 节）
-
-**可用命令**：Level 0 + `/harness:verify`（项目级，不关联 feature）
-
-**MUST NOT**：
-- 创建 feature registry
-- 修改任何 feature status
-- 将项目级 passing 推断为任何 feature 的 passing
-- 静默执行未经用户确认的 detected 命令
-
-#### Level 2：Feature-Driven Development（完整 harness）
-
-**能力**：
-- Level 1 全部能力
-- Feature registry 管理（CRUD + 状态机）
-- Evidence-to-feature association
-- WIP tracking
-
-**判定**：
-- 存在 feature registry（默认为 `feature_list.json`），且
-- 项目处于 Level 1 能力状态
-
-**权威状态源**：feature registry
-
-**可用命令**：全部 6 个命令
-
-#### 能力总结
-
-| 能力 | Level 0 | Level 1 | Level 2 |
-|------|:-------:|:-------:|:-------:|
-| Knowledge guidance | ✅ | ✅ | ✅ |
-| 可发现的 verification plan | — | ✅ | ✅ |
-| 项目级 evidence（ndjson） | — | ✅ | ✅ |
-| Feature registry | — | — | ✅ |
-| Feature state machine | — | — | ✅ |
-| Evidence-to-feature association | — | — | ✅ |
-| `/harness:status` | ✅ 基础 | ✅ | ✅ |
-| `/harness:verify` | — | ✅ | ✅ |
-| `/harness:feature` | — | — | ✅ |
-| `/harness:audit` | ✅ 部分 | ✅ | ✅ |
-
-### 5.2 Adapter Contract Tables
-
-#### Claude Code Adapter
-
-| 职责 | 实现方式 | 约束 |
-|------|---------|------|
-| Hook 事件映射 | Bash 脚本 → `~/.claude/settings.json` 的 hooks 配置 | MUST fail-open |
-| SessionStart 注入 | `session-start.sh` → `additionalContext` | 派生视图，非权威状态 |
-| Stop 提醒 | `stop-handoff.sh` → `systemMessage` | SHOULD 提示但不阻塞 |
-| 项目模板 | `CLAUDE.md`, `claude-progress.md` | 推荐默认值 |
-| 安装 | `install.sh` → `~/.claude/skills/harness-companion/` | MUST 备份 settings.json |
-| 降级 | N/A（hooks 是 Claude Code 原生能力） | — |
-
-#### Codex Adapter
-
-| 职责 | 实现方式 | 约束 |
-|------|---------|------|
-| Hook 事件映射 | Bash 脚本 → `config.toml` `[[hooks]]` 块，`type: "command"` | MUST fail-open |
-| SessionStart 注入 | `session-start.sh` → hook output | 字段名待 prototype 验证 |
-| Stop 提醒 | `stop-handoff.sh` → hook output | SHOULD 提示但不阻塞 |
-| Windows 备选 | `commandWindows` 提供 `.cmd` 备选脚本 | Git Bash 不可用时的降级路径 |
-| Hook 配置 | 同时提供 `hooks.json` 和 `config.toml` 配置 | 适配 Codex 不同的 hook 发现机制 |
-| 项目模板 | `AGENTS.md`, `codex-progress.md` | AGENTS.md 是 Codex 默认项目指令文件 |
-| 安装 | `install.sh` → 目标路径取决于 Codex skill/plugin 模式 | MUST 备份现有配置 |
-| 降级 | Hook disabled / untrusted / unavailable → 显式工作流模式 | MUST 清晰说明降级原因和受影响功能 |
-
-**Hook 不可用时的降级说明**（MUST 在 install 输出和 README 中呈现）：
-
-| 条件 | 影响 | 操作 |
-|------|------|------|
-| hooks disabled（用户关闭） | SessionStart 状态注入不可用 | 手动 `/harness:status` |
-| hooks untrusted（Codex 信任流程未完成） | 所有自动 hook 不可用 | 完成信任流程或使用显式命令 |
-| Windows sandbox（Codex 已知限制） | hooks 可能不触发 | 使用 `commandWindows` 备选或显式命令 |
-| hooks 配置缺失 | 同 disabled | 运行 install.sh 注册 hooks |
-
-### 5.3 Verification Plan 设计
-
-#### 命令来源优先级
-
-验证命令 MUST NOT 被硬编码（如固定 `npx tsc --noEmit` → `npm run build` → `npm test`）。
-
-命令来源按优先级：
-
-1. **configured**：用户显式配置于 `.harness/config.json`
-2. **detected**：从项目 manifest 探测（`package.json` scripts, `pyproject.toml`, `Makefile`, `justfile`, `Cargo.toml` 等）
-3. **confirmed**：探测结果经用户确认（交互式确认或一次性 approve）
-4. **executed**：已执行（此时命令来源记录为实际来源）
-
-#### 允许的 Verification Steps
-
-Verification plan MAY 包含任意数量和任意命名的 steps，包括但不限于：
-
-```
-lint, typecheck, unit-test, integration-test, build, 
-package, e2e-test, security-audit, docs-check, 
-domain-specific-validation, ...
-```
-
-没有 build step 的项目（文档、数据、基础设施、研究项目）MUST 也能使用 Level 1。
-
-#### 探测行为约束
-
-- **detected** 状态：探测结果 MAY 被输出为建议，但 MUST NOT 在未经用户确认时执行
-- 高成本命令（如 `npm install`, `docker build`）MUST NOT 被自动探测为 verification step
-- 有副作用的命令（如写入外部服务的 `publish`, `deploy`）MUST NOT 出现在 verification plan 中，除非用户显式配置
-- 证据 record 的 `command_source` 字段 MUST 记录命令来源
-
-### 5.4 Level 1 Verification 设计
-
-#### 数据存储
-
-Level 1 验证结果写入：
-
-```
-.harness/logs/verification.ndjson
-```
-
-每行一条 JSON record（NDJSON 格式）。Append-only。
-
-#### Verification Record Schema
-
-每条 record MUST 包含：
-
-```json
-{
-  "schema_version": 1,
-  "run_id": "20260731T151257Z-12345-32767",
-  "started_at": "2026-07-31T15:12:57Z",
-  "completed_at": "2026-07-31T15:13:12Z",
-  "run_status": "completed",
-  "project_root": "/path/to/project",
-  "vcs_revision": "abc1234def56",
-  "vcs_revision_null_reason": null,
-  "config_summary": {
-    "config_path": ".harness/config.json",
-    "config_sha256": "6dcd4ce23d88e...",
-    "command_count": 3
-  },
-  "commands": [
-    {
-      "command_id": "typecheck",
-      "command": ["npx", "tsc", "--noEmit"],
-      "command_source": "configured",
-      "exit_code": 0,
-      "started_at": "2026-07-31T15:12:57Z",
-      "duration_ms": 12400,
-      "log_artifact": ".harness/logs/verify-typecheck-20260731T151257Z.log",
-      "log_sha256": "abcd1234..."
-    }
-  ],
-  "overall_result": "passed",
-  "log_artifact": null,
-  "log_sha256": null
-}
-```
-
-#### 字段说明
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `run_id` | string | 本次 run 的唯一标识。MUST 全局唯一 |
-| `run_status` | string | `started` / `completed` / `failed` / `aborted` |
-| `vcs_revision` | string \| null | VCS revision。不可获得时为 null |
-| `vcs_revision_null_reason` | string \| null | 当 `vcs_revision` 为 null 时说明原因（如 `"no_git"`） |
-| `command_source` | string | 命令来源：`configured` / `detected` / `confirmed` / `executed` |
-| `overall_result` | string | `passed` / `failed` / `aborted` |
-
-#### Level 1 Passing 语义
-
-- `overall_result: "passed"` 表示**本次项目级 verification run 的全部命令 exit_code 为 0**
-- 它 MUST NOT 被解释为任何 feature 的 passing 状态
-- 它 MAY 被 Level 2 feature 通过显式关联引用，但 MUST NOT 自动推断关联
-- 失败的 run（`overall_result: "failed"`）MUST 同样写入 log，不得丢弃
-
-### 5.5 权威状态层级
-
-以下规则 MUST 在整个系统中保持一致：
-
-| 层级 | 数据 | 角色 |
-|------|------|------|
-| **权威状态** | Feature registry (`feature_list.json`) | Feature lifecycle 的 single source of truth |
-| **运行事实** | Verification log (`verification.ndjson` / feature_events.jsonl) | Append-only 的运行记录。不可修改 |
-| **引用关系** | Evidence association（feature 中的 `evidence[].run_id`） | Feature 与 verification run 的关联 |
-| **派生视图** | Dashboard / status 输出 | 从权威状态 + 运行事实计算得出。不具备独立修改能力 |
-| **提示/上下文** | Hook 输出（SessionStart status, Stop warnings） | 只读信息。不是权威状态。不影响 passing eligibility |
-
-**禁止的模式**：
-- 在 registry、log、dashboard、handoff 文档中复制多份可独立修改的 passing 状态
-- 从 hook 输出反推 feature status
-- Dashboard 显示与 registry 不一致的状态
-
-### 5.6 Architecture Invariant：Adapter 不得包含业务语义
-
-**MUST**：以下规则只能存在于 `core/` 中。任何 adapter MUST NOT 包含或重新实现：
-
-- Feature 状态机 transition 逻辑
-- WIP limit 判定
-- Passing eligibility 计算
-- Evidence validity 判断
-- Verification result 语义（什么叫 "passed"）
-- Override audit 逻辑
-- run_id 生成或验证规则
-
-**Adapter 的允许职责**（MUST NOT 超出）：
-
-1. Host 事件映射（接收 platform hook 输入 → 转化为环境变量 → 调用 core）
-2. 输入规范化（平台特定路径分隔符、JSON 字段名差异）
-3. 调用 core（通过环境变量传递配置 → 执行 core 脚本）
-4. 输出转换（core 的输出 → platform 期望的 hook 协议格式）
-5. Host-specific 安装和降级处理
-
-**Contract test 验证**：每个 adapter 的测试 MUST 断言：
-- adapter 输出的 feature 状态与 core 计算一致
-- adapter 不包含业务逻辑的特定字符串（如 `is_eligible_for_passing` 函数体）
-
-### 5.7 Audit 设计：基于能力评估
-
-Audit MUST 评估**能力是否存在**，而不是按特定文件名机械评分。
-
-#### 评估维度
-
-| 子系统 | 评估方式 | 高置信度探测入口（SHOULD，不是唯一方式） |
-|--------|---------|------------------------------------------|
-| Knowledge | Agent 能否找到项目知识和操作指令 | adapter 声明的 knowledge_entry 文件 |
-| Environment | 开发环境是否可复现 | `init.sh`, `Makefile`, `justfile`, `Taskfile`, CI workflow |
-| Progress | 是否有工作记录机制 | 进度文件（任意名称），handoff 文档 |
-| Scope/Feature | 是否有 work-item tracking | `feature_list.json`, YAML registry, SQLite, 外部 issue tracker |
-| Verification | 是否有可执行的验证链 | `.harness/config.json`, `package.json` scripts, `Makefile` targets |
-| Observability | 是否有运行记录 | `verification.ndjson`, 测试报告, CI 日志 |
-| Handoff | 是否有结构化交接文档 | 任意结构化交接文档（不限文件名） |
-
-#### 评分原则
-
-- 探测入口（默认文件名）是 SHOULD 级别的高置信度提示，不是 MUST 级别的唯一合格实现
-- 如果项目通过等效方式实现了能力（如用 `Makefile` 而非 `init.sh`），SHOULD 给予相同评分
-- Audit 输出 MUST 区分 "能力存在但实现方式非默认" 和 "能力缺失"
-
----
-
-## 6. 并发与 Run 生命周期
-
-### 6.1 Run 状态模型
-
-每个 verification run MUST 经过以下状态之一：
-
-```
-started → completed   （全部命令执行成功）
-started → failed      （至少一个命令 exit_code != 0，或执行过程异常）
-started → aborted     （外部中断，如 SIGTERM、超时）
-```
-
-`started` 状态 MUST 在 run 开始时写入（marker record）。
-
-### 6.2 Run ID 唯一性
-
-`run_id` MUST 全局唯一。生成方式（reference runtime）：
-
-```
-timestamp-PID-RANDOM
-```
-
-`run_id` 格式是 runtime 实现细节。任何产生全局唯一标识的算法 MAY 使用。
-
-### 6.3 NDJSON 并发追加
-
-`verification.ndjson` 是 NDJSON 格式（每行一条 JSON record）。并发追加：
-
-- 单行写入 + `\n` 终止
-- 底层文件系统 `O_APPEND` 或等效原子追加
-- 单行 MUST ≤ 操作系统原子写入上限（通常 ≤ PIPE_BUF，但 NDJSON 记录 > PIPE_BUF 时依赖行级完整性）
-- 如果 OS 不支持原子行追加，MAY 退化为 逐行 atomic write（temp + rename per record）
-- MAY 在 append 后读取并验证写入行的完整性
-
-### 6.4 Feature Registry 并发（CAS）
-
-Level 2 registry 更新使用 CAS（Compare-and-Swap）：
-
-1. 读取 `feature_list.json`，记录 `last_updated`
-2. 在内存中修改
-3. 读取当前 `feature_list.json` 的 `last_updated`
-4. 如果不一致 → CONFLICT → retry（最多 3 次，每次随机 10-100ms jitter）
-5. 如果一致 → atomic write 新内容
-6. 3 次失败 → exit 4
-
-### 6.5 日志成功但 Registry 关联失败的恢复
-
-场景：verification 执行成功，evidence 写入了 ndjson，但 feature registry CAS 更新失败。
-
-恢复策略：
-
-1. ndjson 中的 evidence record 是持久化的运行事实
-2. Registry 更新失败时 MUST 报错，exit non-zero
-3. 用户可以手动重试关联：`/harness:feature associate <feature-id> <run_id>`
-4. 下次 verify 也会自然覆盖（新的 evidence 在数组中排后面）
-
-### 6.6 Incomplete Run 识别
-
-- 存在 marker record `run_status: "started"` 但没有对应 `run_status: "completed"` / `"failed"` / `"aborted"` 的 run → incomplete
-- Status 面板 SHOULD 警告 incomplete run
-- Incomplete run 的 evidence MUST NOT 参与 passing eligibility
-- Cleanup：MAY 提供 `harness-log-cleanup.sh` 标记或移除 incomplete run
-
-### 6.7 同一 Run 的重复提交
-
-同一 `run_id` 的 evidence records MAY 多次追加（例如逐 command 写入），但 `run_status` 的最终状态（completed/failed/aborted）MUST 只写入一次。
-
----
-
-## 7. 安全模型
-
-### 7.1 Hook Trust
-
-- Hook 运行项目内命令，MUST 遵守 platform 的 trust 机制
-- Codex hook trust 流程：untrusted hooks MUST NOT 自动运行。用户 MUST 显式信任后才能激活 hook 模式
-- 未获信任时，MUST 降级为 explicit invocation 模式
-
-### 7.2 命令执行安全
-
-| 规则 | 约束级别 |
-|------|---------|
-| 不得使用 `eval` 拼接未验证的用户输入 | MUST |
-| 命令来自 `config.json` 的 `command[]` 数组（argv），不是 shell 字符串 | MUST |
-| 每个 command 有独立 timeout（默认 300s，可配置） | MUST |
-| 命令输出大小限制（默认 10MB，可配置） | SHOULD |
-| 环境变量写入 evidence 时 MUST 过滤 secrets（基于已知 key pattern 如 `*_TOKEN`, `*_SECRET`, `*_KEY`） | MUST |
-| 完整环境变量 MUST NOT 写入 evidence | MUST |
-
-### 7.3 日志安全
-
-- evidence 中的 `log_artifact` 指向日志文件路径
-- log 文件 MAY 包含命令的 stdout/stderr
-- Log 写入前 SHOULD 扫描常见 secret pattern 并 redact
-- Log 文件 SHOULD 加入 `.gitignore`
-
-### 7.4 Hook 失败不能伪装为验证通过
-
-- Hook 自身的失败（crash, timeout）MUST NOT 被报告为 "verification passed"
-- Hook 输出中的 `continue: true` 仅表示 hook 不阻塞 session，不等于验证通过
-- Verification status 只能由 `harness-verify.sh` 的 exit code + evidence log 决定
-
----
-
-## 8. 向后兼容与数据迁移
-
-### 8.1 兼容策略
-
-| 数据类型 | 策略 |
-|---------|------|
-| v1.1.2 `feature_list.json` | 读取兼容：识别旧字段。写入新格式：添加 `schema_version`、`last_updated` |
-| 旧字符串 evidence (`evidence[]` 中的 string) | 读取时标记为 `run_id: null`，不参与 passing。写入时使用新格式 |
-| 旧 `agent.log` | 读取兼容。不再主动写入（新数据走 ndjson） |
-| `Codex-progress.md` (旧) | 读取兼容。继续写入当 adapter 声明了 progress_file |
-| 旧 hook 配置 | 不覆盖。install 时检测已有配置并提示手动迁移 |
-| 用户自定义模板 | MUST NOT 覆盖。init 时检测冲突并提示 diff |
-| `.harness/config.json` | 读取兼容旧 schema。写入时升级到新 schema_version |
-
-### 8.2 迁移原则
-
-- **读取兼容、写入新格式**：MUST 能读取旧版本数据。写入时 MUST 使用当前 schema_version
-- **不静默覆盖**：init、install、migrate MUST 在目标文件已存在时提示，不静默替换
-- **幂等迁移**：重复运行迁移 MUST 产生相同结果
-
-### 8.3 旧数据与 passing eligibility
-
-- v0 字符串 evidence → `run_id: null` → 不参与 passing
-- v1.1.0 structured evidence 无 `run_id` → `run_id: null` → 不参与 passing
-- 所有 `run_id: null` → `replay_required`（exit 2，提示重新 verify）
-- 重新 verify 后产生有 `run_id` 的 evidence → 旧 records 保留于数组（审计用途）
-- 旧 records 不得被删除或修改
-
----
-
-## 9. Level 1 → Level 2 迁移路径
-
-### 9.1 迁移规则
+### 13.2 命令执行安全
 
 | 规则 | 约束 |
 |------|------|
-| 原 Level 1 `verification.ndjson` 保持完整不变 | MUST |
-| 创建 feature registry 不重写历史日志 | MUST |
-| 历史 `run_id` 只能由用户显式关联到新 feature | MUST |
-| 不得根据时间、分支名或 commit message 自动推断关联 | MUST |
-| 旧项目级 `overall_result: "passed"` 不得自动升级为 feature passing | MUST |
-| `schema_version` 迁移必须幂等 | MUST |
+| 不得使用 `eval` 拼接未验证输入 | MUST |
+| 命令来自 `command[]` 数组（argv），不是 shell 字符串 | MUST |
+| 每个 command 独立 timeout（默认 300s） | MUST |
+| 命令输出大小限制（默认 10MB） | SHOULD |
+| 环境变量写入 evidence 时过滤 secrets（`*_TOKEN`, `*_SECRET`, `*_KEY`） | MUST |
+| 完整环境变量 MUST NOT 写入 evidence | MUST |
 
-### 9.2 迁移操作
+### 13.3 日志安全
 
-用户从 Level 1 升级到 Level 2：
-
-1. 运行 `/harness:init --level 2`（或 `--with-registry`）
-2. 创建 `feature_list.json`
-3. 用户自行创建 features（`/harness:feature add <id>`）
-4. 用户显式关联历史 evidence：`/harness:feature associate <feature-id> <run_id>`
-5. 关联操作记录为 `association` 事件（写入 evidence log）
+- `log_artifact` 指向命令日志文件。Log MAY 包含 stdout/stderr
+- Log 写入前 SHOULD 扫描 secret pattern 并 redact
+- Log 文件 SHOULD 加入 `.gitignore`
 
 ---
 
-## 10. 分阶段实施计划
+## 14. 向后兼容与数据迁移
 
-### Phase 0：冻结 + 基线
+| 数据类型 | 策略 |
+|---------|------|
+| v1.1.2 `feature_list.json` | 读取兼容。写入时使用 v2 schema + association |
+| 旧字符串 evidence | `run_id: null`。不参与 passing。保留于数组供审计 |
+| 旧 `agent.log` | 读取兼容。不再主动写入 |
+| 旧 hook 配置 | 不覆盖。提示手工迁移 |
+| 用户自定义模板 | MUST NOT 覆盖。检测冲突并提示 diff |
+| `.harness/config.json` | 读取兼容旧 schema。写入升级 |
 
-- 标记 `v1.1.2-frozen` tag
-- 创建 `feat/harness-companion-v2` 分支
-- v1 测试在 CI 中持续运行
-
-### Phase 1：核心提取 + 并发基础设施（最小风险）
-
-- 创建 `core/` 目录，迁移库文件（环境变量参数化）
-- 实现 CAS + NDJSON append 并发基础设施
-- 处理 `run_id: null` → `replay_required`
-- 核心测试 ≥ 90 passed, 0 failed
-- 运行时目录：`~/.harness-companion/`
-
-### Phase 2：Claude Code Adapter
-
-- 从 v1.1.2 hooks/templates 迁移
-- `adapter.conf` + semantic tests
-
-### Phase 3：Codex Adapter（Bash-only）
-
-**前置条件**：Codex hook 协议 prototype 验证完成（附录 B 中标记的假设已验证或确认可接受风险）
-
-- Bash command hooks（`type: "command"`）
-- `commandWindows` `.cmd` 备选脚本
-- `hooks.json` + `config.toml` 配置生成
-- 降级策略（hooks disabled/untrusted/unavailable）
-- 模板：`AGENTS.md`, `codex-progress.md`
-
-### Phase 4：迁移工具 + 文档
-
-### Phase 5：验证 + 发布
+原则：**读取兼容、写入新格式**。**不静默覆盖**。**幂等迁移**。
 
 ---
 
-## 11. 测试矩阵
+## 15. Level 1 → Level 2 迁移
 
-### 11.1 Core Contract Tests
-
-| 测试 | 覆盖规则 |
-|------|---------|
-| Level 0 能力判定（无 config, 无 registry） | Level 判定逻辑 |
-| Level 1 能力判定（有 config, 无 registry） | Level 判定逻辑 |
-| Level 2 能力判定（有 config, 有 registry） | Level 判定逻辑 |
-| Level 1 verify 产生 ndjson | 5.4 |
-| Level 1 overall_result = "passed" 不产生 feature status | 5.4 passing 语义 |
-| Level 2 evidence 只能引用真实 run_id | 1.2 |
-| Adapter 不包含 WIP/evidence 业务逻辑 | 5.6 contract test |
-| 状态机全部合法 transition | 1.3 |
-| 状态机会拒绝未列出的 transition | 1.3 |
-| 全部 evidence run_id 为 null → replay_required | 1.2 |
-| fail-closed 场景（missing jq, missing config, missing command） | 1.4 |
-
-### 11.2 Project Diversity Tests
-
-| 项目类型 | 验证点 |
-|---------|--------|
-| Node/TypeScript | 探测 package.json scripts |
-| Python | 探测 pyproject.toml / setup.cfg |
-| Rust | 探测 Cargo.toml |
-| Go | 探测 go.mod / Makefile |
-| Makefile-only | 探测 Makefile targets |
-| justfile-only | 探测 justfile recipes |
-| 文档项目（无 build step） | Level 1 可用，0 verification steps |
-| 无 Git 项目 | vcs_revision = null, null_reason = "no_git" |
-| Monorepo（子目录启动） | project_root 正确 |
-| 路径含空格和 Unicode | 路径处理正确 |
-
-### 11.3 Host Adapter Tests
-
-| 测试 | Platform |
-|------|---------|
-| SessionStart hook 输出正确 platform 格式 | Claude Code |
-| Stop hook 输出正确 platform 格式 | Claude Code |
-| Hook 模板包含 CLAUDE.md（非 AGENTS.md 作为知识入口） | Claude Code |
-| SessionStart hook 输出正确 platform 格式 | Codex |
-| Stop hook 输出正确 platform 格式 | Codex |
-| hooks.json 结构正确 | Codex |
-| config.toml `[[hooks]]` 块正确 | Codex |
-| hooks disabled → 降级提示 | Codex |
-| hooks untrusted → 降级提示 | Codex |
-| hookless explicit invocation 可用 | Codex |
-| commandWindows .cmd 脚本可执行 | Codex |
-| Git Bash / WSL 均可运行 | Codex (Windows) |
-
-### 11.4 Failure and Concurrency Tests
-
-| 测试 | 验证点 |
-|------|--------|
-| 命令不存在 → exit 127，不伪装通过 | 1.4, 7.4 |
-| jq 不存在 → exit 2 | 1.4 |
-| verification 中途终止 → incomplete run | 6.1, 6.6 |
-| hook timeout → fail-open, continue: true | 1.5, 7.4 |
-| 日志目录不可写 → 明确报错 | 7.4 |
-| CAS 冲突 → retry 成功 | 6.4 |
-| CAS 3 次冲突 → exit 4 | 6.4 |
-| 两个 verify 并发 → 两条独立 evidence 均保留 | 6.3 |
-| 日志成功但 registry 关联失败 → 报错 + 手动恢复路径 | 6.5 |
-| 同一 run_id 重复追加 → 不损坏数据 | 6.7 |
-| 重复迁移 → 幂等 | 8.2 |
-
-### 11.5 Migration Tests
-
-| 测试 | 验证点 |
-|------|--------|
-| 旧 feature_list.json（v1.1.2 schema） | 读取兼容，写入升级 |
-| 字符串 evidence 数组 | run_id: null，不参与 passing |
-| 已有 AGENTS.md 不被 init 覆盖 | 8.2 |
-| Level 1 → Level 2：原 ndjson 不变 | 9.1 |
-| Level 1 → Level 2：手动关联 run_id 到 feature | 9.2 |
-| 重复迁移结果一致 | 8.2 |
-
----
-
-## 12. 风险与未验证假设
-
-### 12.1 主要风险
-
-| 风险 | 缓解 |
+| 规则 | 约束 |
 |------|------|
-| Codex hook output 字段名与 Claude Code 不同 | Phase 3 前 prototype 验证 |
-| Codex Windows sandbox hook 不可靠 | 降级到 explicit invocation + commandWindows 备选 |
-| macOS bash 3.2 语法限制 | CI 中测试 macOS bash 3.2 |
-| Evidence NDJSON log 无限增长 | 初期无需压缩。提供 `harness-log-compress.sh` 维护工具 |
+| Level 1 run logs（`runs/*.ndjson`）保持完整不变 | MUST |
+| 创建 registry 不重写历史日志 | MUST |
+| 历史 `run_id` 只能由用户显式关联到 feature | MUST |
+| 不得根据时间、分支名、commit 自动推断关联 | MUST |
+| Level 1 `overall_result: "passed"` 不得自动升级为 feature passing | MUST |
 
-### 12.2 经研究确认（不再是不确定的假设）
+迁移操作：
+1. `/harness:init --level 2` → 创建 `feature_list.json`
+2. 用户创建 features：`/harness:feature add <id>`
+3. 用户显式关联：`/harness:feature associate <feature-id> <run_id>`
+4. 关联记录写入 `evidence_associations[]`
 
-- ✅ Codex 有 SessionStart/Stop hooks
-- ✅ Codex hooks 配置在 `~/.codex/config.toml`（TOML），不是 `settings.json`
-- ✅ Codex 使用 `AGENTS.md` 作为项目指令文件，不使用 `CLAUDE.md`
-- ✅ Codex hooks 支持 `type: "command"`（可以调用 Bash 脚本，不需要 Node.js）
-- ✅ Codex 有 `commandWindows` 用于 Windows-specific 命令
+---
 
-### 12.3 仍未验证
+## 16. 分阶段实施计划
+
+| Phase | 内容 | 前置条件 |
+|-------|------|---------|
+| 0 | 冻结 v1.1.2，创建 v2 分支 | — |
+| 1 | Core：event log 写入 + lock 协议 + passing 逻辑 + staleness | — |
+| 2 | Claude Code adapter | Phase 1 |
+| 3 | Codex adapter（Bash-only，按 12.3 节配置） | Phase 2 + Codex hook 协议 prototype |
+| 4 | 迁移工具 + 文档 | Phase 2 |
+| 5 | 验证 + 发布 | Phase 4 |
+
+---
+
+## 17. 测试矩阵
+
+### 17.1 Core Contract
+
+- Level 0/1/2 累积判定
+- 状态机全部合法 transition + 拒绝非法
+- 0-step plan → `no_checks`，not `passed`
+- 所有 `run_id` null → `replay_required`
+- fail-closed 全部场景
+
+### 17.2 Evidence Staleness
+
+- clean → dirty：旧 evidence 失效
+- dirty(H1) → dirty(H2)：旧 evidence 失效
+- dirty(H) → dirty(H)：相同 dirty state，evidence 有效
+- config 修改后旧 evidence 失效
+- config 不变，evidence 有效
+- HEAD 移动后旧 evidence 失效
+
+### 17.3 Concurrency & Locking
+
+- 两个 writer 同时更新 registry → lock 保证无丢失
+- lock timeout → exit 5
+- 两个 run 并发 → 不同文件，零竞争
+- 同一 run 内 command 顺序 → 文件完整
+- started 无 terminal → incomplete，passing=false
+- 同 run 多个 terminal → corrupted，passing=false
+- association 指向不存在 run → passing=false
+- association 指向损坏 run → passing=false
+- crash 后 lock 可恢复（stale PID 检测）
+
+### 17.4 Project Diversity
+
+- Node / Python / Rust / Go / Makefile / justfile / 文档项目
+- 无 Git 项目 / monorepo / 路径含空格和 Unicode
+
+### 17.5 Host Adapters
+
+- Claude Code SessionStart / Stop 输出格式
+- Codex SessionStart / Stop 输出格式（per-event schema）
+- Codex hooks.json 生成 / config.toml `[[hooks]]` 生成
+- 同一 Codex 安装模式不重复注册
+- Codex hooks disabled / untrusted → 降级
+- Codex commandWindows .cmd 备选
+
+### 17.6 Migration
+
+- 旧 feature_list.json 读取兼容
+- 字符串 evidence → run_id: null
+- 用户文件不被覆盖
+- Level 1 → Level 2 日志不变、手动关联
+- 重复迁移幂等
+
+---
+
+## 18. 风险与未验证假设
+
+### 已确认
+
+- ✅ Codex 使用 AGENTS.md，不是 CLAUDE.md 或 CODEX.md
+- ✅ Codex hooks 配置在 `config.toml`（TOML），不是 `settings.json`
+- ✅ Codex hooks 支持 `type: "command"`
+- ✅ Codex 原生环境变量：`PLUGIN_ROOT`, `PLUGIN_DATA`
+
+### 未验证（需 Phase 3 prototype）
 
 | 假设 | 影响 | 验证时机 |
 |------|------|---------|
-| Codex hook JSON output 的 exact 字段名 | adapter hook 输出格式 | Phase 3 前 |
-| `config.toml` `[[hooks]]` 块的 exact schema | 自动生成配置 | Phase 3 前 |
-| Codex `CLAUDE_PLUGIN_ROOT` 兼容在最新版本中仍有效 | bash adapter 可复用 Claude hook 脚本结构 | Phase 3 前 |
-| Codex Windows sandbox hook 不可靠的具体条件 | Windows 降级策略 | Phase 3 前 |
-| `.codex-plugin/plugin.json` 完整 schema | 插件方式安装 | Phase 3 前 |
-| macOS bash 3.2 下 `date -u +%Y-%m-%dT%H:%M:%SZ` 行为 | run_id 格式 | Phase 1 |
+| Codex 各 hook event 的 exact JSON output schema | adapter 输出格式 | Phase 3 前 |
+| `config.toml` `[[hooks]]` block exact schema | 自动配置生成 | Phase 3 前 |
+| Codex Windows sandbox hook 可靠性 | Windows 降级策略 | Phase 3 前 |
+| Git Bash `mkdir` 锁可靠性 | Windows lock fallback | Phase 2 前 |
+| macOS bash 3.2 行为一致性 | core 兼容性 | Phase 1 |
 
 ---
 
-## 13. Non-Goals
+## 19. Non-Goals
 
-以下明确**不在**本次设计的范围内：
-
-- 支持 PowerShell native / cmd.exe 作为 runtime shell
-- Codex adapter 的 Node.js runtime（门槛未达到，见 4.3 节）
-- 3+ adapter 的 machine-readable capability protocol（2 adapters 时不需要）
-- 自动将历史 Level 1 verification 结果推断为 feature passing 状态
-- 自动探测并执行未确认的 verification 命令
-- 将 Audit 绑定到特定文件名
+- PowerShell native / cmd.exe runtime
+- Codex Node.js adapter（门槛未达到）
+- 3+ adapter 的 machine-readable protocol
+- 自动推断 Level 1 历史 evidence → feature 关联
+- 自动执行未经确认的 detected 命令
+- Audit 绑定特定文件名
 - 从 hook 输出反推 feature status
 
 ---
 
-## 14. 附录
+## 20. 附录
 
-### 附录 A：全文一致性检查结果
+### 附录 A：Canonical Log Event Schema（摘要）
 
-对以下关键词进行了全文搜索和矛盾修正：
+```
+event: "run_started" | "command_completed" | "run_completed" | "run_failed" | "run_aborted"
+schema_version: 2
 
-| 关键词 | 搜索结果 | 一致性 |
-|--------|---------|--------|
-| `AGENTS.md` | 出现在 Codex adapter（知识入口）、Claude Code adapter（通用 agent 指令）、共享模板 | ✅ 一致：Codex 的 knowledge_entry 是 AGENTS.md，Claude 的 agent_entry 也是 AGENTS.md，两者角色不同 |
-| `CODEX.md` | 不出现在本文中（v2 中曾出现 16 次，已全部删除） | ✅ Codex 不使用 CODEX.md 作为默认项目指令文件 |
-| `settings.json` | 仅出现在 Claude Code adapter 的 install_config_path | ✅ Codex adapter 使用 config.toml |
-| `config.toml` | 出现在 Codex adapter install_config_path | ✅ 与 Codex 实际配置格式一致 |
-| `hooks.json` | 出现在 Codex adapter（hooks.json 作为 Codex hooks 发现机制的备选配置） | ✅ 与 Codex hooks 目录约定一致 |
-| `Node.js` / `.mjs` | 不出现在本文中（v2 中曾出现于 Codex adapter 代码示例，已全部删除） | ✅ Codex adapter 使用 Bash-only |
-| `bash` | 出现在 reference runtime 声明中，Codex adapter hook_runtime=bash | ✅ 一致 |
-| `jq` | 出现在 reference runtime 声明中，fail-closed 规则中 | ✅ 一致 |
-| `feature_list.json` | 出现在 Level 2 判定（默认 registry 文件名） | ✅ SHOULD 级别，非 MUST |
-| `passing` | 出现在语义不变表中（MUST 规则），Level 2 专属 | ✅ 与 Level 1 的 `overall_result` 明确区分 |
-| `run_id` | 出现在 evidence schema、passing eligibility、并发设计、Level 1 ndjson | ✅ 语义一致 |
+run_started:
+    run_id, started_at, project_root, vcs_revision, vcs_revision_source,
+    workspace_fingerprint, config_sha256, required_command_ids[],
+    capability_level, feature_id?
 
-### 附录 B：v1.1.2 已知限制（不变）
+command_completed:
+    run_id, command_id, command[], command_origin, confirmation,
+    exit_code, started_at, duration_ms, log_artifact?, log_sha256?
 
-来自 v1.1.2 MIGRATION.md 的 residual risk 表（与本设计无关的部分略）：
+run_completed | run_failed | run_aborted:
+    run_id, completed_at, overall_result,
+    total_commands, passed_commands, failed_commands, skipped_commands,
+    failed_command_ids[]? (run_failed only),
+    abort_reason? (run_aborted only)
+```
+
+### 附录 B：Feature Association Schema（摘要）
+
+```
+feature.evidence_associations[]:
+    run_id: string        -- references .harness/logs/runs/<run_id>.ndjson
+    associated_at: string -- ISO 8601
+    associated_by: string -- "user"
+```
+
+### 附录 C：v1.1.2 已知限制
 
 | 限制 | v2 处理 |
 |------|---------|
-| `harness-status.sh` 在缺失文件时 abort | v2 已在 status v2 rewrite 中修复（`set +e`） |
-| Audit recency window 全局固定 | 不在本设计范围。v2 audit 已改为能力评估 |
-| 无结构化 evidence 查询 | 不在本设计范围。ndjson log 使外部查询成为可能 |
+| status.sh abort on missing files | v2 rewrite: `set +e` |
+| Audit recency window 固定 | 改为能力评估 |
+| 无结构化 evidence 查询 | NDJSON log 使外部查询成为可能 |
 
-### 附录 C：设计粒度说明
+### 附录 D：约束级别标记
 
-本文使用以下约束级别标记：
-
-| 标记 | 含义 | 示例 |
-|------|------|------|
-| **MUST** | 不可违反的硬约束 | "adapter MUST NOT 包含 WIP 判定逻辑" |
-| **MUST NOT** | 严禁的行为 | "MUST NOT 静默成功" |
-| **SHOULD** | 推荐遵守，偏离需要理由 | "SHOULD 扫描 secret pattern" |
-| **SHOULD NOT** | 推荐避免 | "SHOULD NOT 硬编码为唯一判定条件" |
-| **MAY** | 可选实现 | "MAY 提供 log 压缩工具" |
-
-实现细节（函数拆分、helper 文件边界、错误消息措辞、不影响 contract 的目录细节）留给实现阶段决定，不出现在本设计中。
+| 标记 | 含义 |
+|------|------|
+| **MUST** / **MUST NOT** | 硬约束。不可违反 |
+| **SHOULD** / **SHOULD NOT** | 推荐。偏离需要理由 |
+| **MAY** | 可选实现 |
+| **SHALL** | MUST 的同义词（用于伪代码） |
 
 ---
 
-> **状态**：等待用户审批。确认 v3 设计后，进入实现计划。
+> **状态**：等待审批。确认 v4 后进入实现计划。
