@@ -642,14 +642,19 @@ else
     # Parent .harness/ is guaranteed to exist at this point (logs dir was
     # created above). The lock primitive uses plain mkdir for POSIX-atomic
     # mutual exclusion, so the parent must pre-exist.
-    LOCK_TOKEN="$(acquire_lock "$LOCK_DIR" 10)" || {
+    # IMPORTANT: do NOT wrap acquire_lock in $(...) — for the flock backend,
+    # the FD that holds the kernel lock must outlive the subshell. Calling
+    # acquire_lock directly keeps FD 9 open in this shell; the token is
+    # exposed via $LOCK_REGISTRY_TOKEN. release_lock reads from env (or 2nd
+    # arg).
+    acquire_lock "$LOCK_DIR" 10 || {
       rc=$?
       echo "verify: lock_timeout — could not acquire registry lock after 10s" >&2
       exit "$rc"
     }
     # Ensure release on any exit path. trap is set AFTER acquire so we only
     # release if we actually hold the token.
-    trap 'release_lock "$LOCK_DIR" "$LOCK_TOKEN" >/dev/null 2>&1 || true' EXIT
+    trap 'release_lock "$LOCK_DIR" >/dev/null 2>&1 || true' EXIT
 
     # Read current revision under lock for monotonic increment. jq treats
     # a missing revision as null; coerce to 0 so first write starts at 1.
@@ -669,7 +674,7 @@ else
       echo "Association added to feature_list.json (revision → $next_revision)"
     fi
     # Release the lock now (trap is a safety net for unexpected exits).
-    release_lock "$LOCK_DIR" "$LOCK_TOKEN" >/dev/null 2>&1 || true
+    release_lock "$LOCK_DIR" >/dev/null 2>&1 || true
     trap - EXIT
   else
     echo "Run log written to .harness/logs/runs/${RUN_ID}.ndjson"

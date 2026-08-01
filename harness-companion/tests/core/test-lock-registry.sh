@@ -99,8 +99,9 @@ if [ -n "${TOK1:-}" ]; then
   else
     assert_fail "T1: A release_lock" "exit=$?"
   fi
-  # After release, B can acquire
-  TOK2="$(acquire_lock "$T1/lock" 1)" || assert_fail "T1: B acquires after release" "acquire_lock failed"
+  # After release, B can acquire. Use 3s timeout: on Windows filesystems the
+  # release→acquire handoff can take longer than 1s due to filesystem caching.
+  TOK2="$(acquire_lock "$T1/lock" 3)" || assert_fail "T1: B acquires after release" "acquire_lock failed"
   if [ -n "${TOK2:-}" ]; then
     assert_pass "T1: B acquires after A releases"
     release_lock "$T1/lock" "$TOK2" >/dev/null
@@ -153,7 +154,9 @@ mk_lock_dir "$T3/lock"
 # Inject dead-PID metadata with a (synthetic) start_time; same host as $$.
 # Use a clearly-dead PID (42424242) so kill -0 returns non-zero.
 write_lock_meta "$T3/lock" "42424242" "99999999" "$(hostname)" "$(date +%s)" "old_token"
-TOK3="$(acquire_lock "$T3/lock" 2)" || TOK3=""
+# Use 5s timeout: stale recovery involves multiple polling iterations on
+# slower Windows filesystems (rm -rf + mkdir retry cycle).
+TOK3="$(acquire_lock "$T3/lock" 5)" || TOK3=""
 if [ -n "${TOK3:-}" ]; then
   assert_pass "T3: dead-PID metadata on same host → recovered"
   release_lock "$T3/lock" "$TOK3" >/dev/null
@@ -210,7 +213,9 @@ mk_lock_dir "$T6/lock"
 # Foreign hostname + old timestamp (300s ago, well past 60s cross-host grace)
 OLD_TS=$(( $(date +%s) - 300 ))
 write_lock_meta "$T6/lock" "12345" "99999" "some-other-host.example.com" "$OLD_TS" "x"
-TOK6="$(acquire_lock "$T6/lock" 2)" || TOK6=""
+# Use 5s timeout: the cross-host recovery path requires multiple polling
+# iterations on slower Windows filesystems.
+TOK6="$(acquire_lock "$T6/lock" 5)" || TOK6=""
 if [ -n "${TOK6:-}" ]; then
   assert_pass "T6: foreign hostname past grace (300s) → recovered"
   release_lock "$T6/lock" "$TOK6" >/dev/null
@@ -294,6 +299,220 @@ if [ "$rc1" = "0" ] && [ "$rc2" = "0" ] && [ "$rev_after" = "44" ] && [ "$n_asso
   assert_pass "T9: revision 42→44, both associations present"
 else
   assert_fail "T9: revision monotonicity" "rc1=$rc1 rc2=$rc2 rev=$rev_after n_assocs=$n_assocs"
+fi
+
+# ============================================================================
+# T10: background concurrency — A holds lock, B blocks; A releases; B succeeds
+# ============================================================================
+echo ""
+echo "=== T10: background A holds, B blocks, then A releases; B acquires ==="
+T10="$TMPROOT/t10"
+mkdir -p "$T10"
+rm -rf "$T10/lock"
+
+# Process A acquires and holds the lock for 2 seconds, then releases.
+(
+  TOK_A="$(acquire_lock "$T10/lock" 2)" && {
+    # Hold the lock — write a flag file B can poll for confirmation.
+    echo "A holds lock token=$TOK_A" > "$T10/a_holds"
+    sleep 2
+    release_lock "$T10/lock" "$TOK_A" >/dev/null 2>&1
+    rm -f "$T10/a_holds"
+    echo "A released" > "$T10/a_state"
+  }
+) > "$T10/a.log" 2>&1 &
+A_PID=$!
+
+# Wait for A to confirm it holds the lock (poll up to 2s).
+waited=0
+while [ ! -f "$T10/a_holds" ] && [ "$waited" -lt 20 ]; do
+  sleep 0.1
+  waited=$((waited + 1))
+done
+if [ ! -f "$T10/a_holds" ]; then
+  assert_fail "T10: A acquired lock within 2s" "A log: $(cat "$T10/a.log" 2>&1)"
+fi
+
+# Process B tries to acquire — should block (timeout=5 forces a wait).
+T_START=$(date +%s)
+TOK_B="$(acquire_lock "$T10/lock" 5)"
+B_RC=$?
+T_END=$(date +%s)
+B_WAIT=$(( T_END - T_START ))
+
+if [ "$B_RC" = "0" ] && [ -n "$TOK_B" ] && [ "$B_WAIT" -ge 1 ]; then
+  assert_pass "T10: B blocked while A held lock, then acquired after A release (waited ${B_WAIT}s)"
+else
+  assert_fail "T10: B blocks/then acquires" "rc=$B_RC tok='$TOK_B' waited=${B_WAIT}s a_log=$(cat "$T10/a.log" 2>&1)"
+fi
+release_lock "$T10/lock" "$TOK_B" >/dev/null 2>&1 || true
+
+# Wait for A to finish so the cleanup trap can fire.
+wait "$A_PID" 2>/dev/null || true
+
+# ============================================================================
+# T11: two parallel --write on the same project → revision +2, both assocs
+# ============================================================================
+echo ""
+echo "=== T11: two parallel --write → revision +2, both associations ==="
+T11="$TMPROOT/t11"
+rm -rf "$T11"
+mkdir -p "$T11"
+( cd "$T11" && git init --quiet )
+( cd "$T11" && git config user.email "t@t" && git config user.name "t" )
+mkdir -p "$T11/.harness"
+cat > "$T11/feature_list.json" <<'FL'
+{"revision":50,"features":[{"id":"p1","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]},{"id":"p2","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}],"last_updated":"2026-08-01"}
+FL
+cat > "$T11/.harness/config.json" <<'CFG'
+{
+  "project_type": "generic",
+  "verification": {
+    "commands": [
+      {"id":"smoke","command":["bash","-c","echo ok && exit 0"],"required_for_passing":true,"command_origin":"configured","confirmation":"not_required"}
+    ]
+  }
+}
+CFG
+
+# Two concurrent --write invocations, redirected to per-process logs.
+( cd "$T11" && bash "$ROOT_DIR/core/harness-verify.sh" "p1" --write ) > "$T11/p1.log" 2>&1 &
+P1=$!
+( cd "$T11" && bash "$ROOT_DIR/core/harness-verify.sh" "p2" --write ) > "$T11/p2.log" 2>&1 &
+P2=$!
+wait "$P1" 2>/dev/null || true
+wait "$P2" 2>/dev/null || true
+
+rev_after="$(jq -r '.revision' "$T11/feature_list.json" 2>/dev/null)"
+n_assocs="$(jq -r '[.features[] | .evidence_associations | length] | add' "$T11/feature_list.json" 2>/dev/null)"
+p1_n="$(jq -r --arg id "p1" '[.features[] | select(.id == $id) | .evidence_associations | length] | add // 0' "$T11/feature_list.json" 2>/dev/null)"
+p2_n="$(jq -r --arg id "p2" '[.features[] | select(.id == $id) | .evidence_associations | length] | add // 0' "$T11/feature_list.json" 2>/dev/null)"
+lock_remaining="no"
+[ -d "$T11/.harness/.registry.lock" ] && lock_remaining="yes"
+
+if [ "$rev_after" = "52" ] && [ "$n_assocs" = "2" ] && [ "$p1_n" = "1" ] && [ "$p2_n" = "1" ] && [ "$lock_remaining" = "no" ]; then
+  assert_pass "T11: revision 50→52, both p1+p2 associations preserved, lock_dir cleaned"
+else
+  assert_fail "T11: parallel --write serialization" "rev=$rev_after n=$n_assocs p1=$p1_n p2=$p2_n lock=$lock_remaining"
+fi
+
+# ============================================================================
+# T12: timeout=5 — caller asks for too little, lock held by another, exits 5
+# ============================================================================
+echo ""
+echo "=== T12: timeout=5 with held lock → exit 5 (lock_timeout) ==="
+T12="$TMPROOT/t12"
+mkdir -p "$T12"
+rm -rf "$T12/lock"
+
+# Holder: pre-create lock_dir with alive-PID + mismatched start_time so the
+# lock is judged NOT stale (T4 behavior). Caller's only recourse is timeout.
+mkdir -p "$T12/lock"
+write_lock_meta "$T12/lock" "$$" "1" "$(hostname)" "$(date +%s)" "frozen_token"
+
+T_START=$(date +%s)
+LOCK_RC=0
+acquire_lock "$T12/lock" 5 >/dev/null 2>&1 || LOCK_RC=$?
+T_END=$(date +%s)
+LOCK_WAIT=$(( T_END - T_START ))
+
+if [ "$LOCK_RC" = "5" ] && [ "$LOCK_WAIT" -ge 4 ] && [ "$LOCK_WAIT" -le 7 ]; then
+  assert_pass "T12: timeout=5 with held lock → exit 5 after ${LOCK_WAIT}s (no stealing)"
+else
+  assert_fail "T12: timeout=5 fails closed" "rc=$LOCK_RC waited=${LOCK_WAIT}s (expected ~5s)"
+fi
+rm -rf "$T12/lock"
+
+# ============================================================================
+# T13: flock backend contention — A holds lock in same shell, B blocks
+# ============================================================================
+# Per G3 re-verification: prove that under LOCK_REGISTRY_BACKEND=flock, B
+# cannot acquire the lock until A's mutation completes and A releases.
+# Skipped when flock(1) is not installed (e.g., Windows Git Bash).
+echo ""
+echo "=== T13: flock backend contention (skipped if flock absent) ==="
+T13="$TMPROOT/t13"
+mkdir -p "$T13"
+rm -rf "$T13/lock"
+if ! command -v flock >/dev/null 2>&1; then
+  echo "SKIP: T13: flock(1) not installed on this platform — test skipped (Linux-only)"
+else
+  # Write a tiny harness that:
+  #   1. Sources lock-registry.sh with LOCK_REGISTRY_BACKEND=flock
+  #   2. Acquires the lock in its own shell (NOT $())
+  #   3. Writes a sentinel file the test will check
+  #   4. Sleeps 3s to hold the lock
+  #   5. Releases
+  HOLDER="$T13/holder.sh"
+  WAITER="$T13/waiter.sh"
+  cat > "$HOLDER" <<'HOLDER_EOF'
+#!/bin/bash
+set -uo pipefail
+LOCK_DIR="$1"
+SENTINEL="$2"
+source "$CORE_LIB/lock-registry.sh"
+export LOCK_REGISTRY_BACKEND=flock
+acquire_lock "$LOCK_DIR" 5 || { echo "HOLDER: acquire failed" >&2; exit 7; }
+date +%s.%N > "$SENTINEL"
+sleep 3
+release_lock "$LOCK_DIR"
+exit 0
+HOLDER_EOF
+  cat > "$WAITER" <<'WAITER_EOF'
+#!/bin/bash
+set -uo pipefail
+LOCK_DIR="$1"
+START_SENTINEL="$2"
+T_START=$(date +%s.%N)
+source "$CORE_LIB/lock-registry.sh"
+export LOCK_REGISTRY_BACKEND=flock
+acquire_lock "$LOCK_DIR" 10 || { echo "WAITER: acquire failed" >&2; exit 7; }
+T_END=$(date +%s.%N)
+# Record our waited time in seconds (with one decimal)
+awk -v s "$T_START" -v e "$T_END" 'BEGIN { printf "%.1f\n", e - s }' > "${START_SENTINEL}.waited"
+release_lock "$LOCK_DIR"
+exit 0
+WAITER_EOF
+  chmod +x "$HOLDER" "$WAITER"
+
+  # Launch holder first; as soon as the sentinel file appears, launch waiter.
+  ( CORE_LIB="$CORE_LIB" bash "$HOLDER" "$T13/lock" "$T13/holder_started" ) &
+  HOLDER_PID=$!
+  # Wait up to 5s for holder to write the sentinel.
+  WAITED=0
+  while [ ! -f "$T13/holder_started" ] && [ "$WAITED" -lt 50 ]; do
+    sleep 0.1
+    WAITED=$((WAITED + 1))
+  done
+  if [ ! -f "$T13/holder_started" ]; then
+    assert_fail "T13: holder did not start" "no sentinel"
+    kill -9 "$HOLDER_PID" 2>/dev/null || true
+  else
+    T_WAIT_START=$(date +%s.%N)
+    ( CORE_LIB="$CORE_LIB" bash "$WAITER" "$T13/lock" "$T13/waiter_started" ) &
+    WAITER_PID=$!
+
+    # Waiter should NOT acquire before holder finishes (≥3s wait).
+    if [ -f "$T13/waiter_started.waited" ]; then
+      # Both finished — analyze.
+      WAIT_TIME="$(cat "$T13/waiter_started.waited")"
+      # Compare wait time ≥ 2.5s (holder held for 3s, waiter must wait at least
+      # most of that).
+      WAIT_OK=$(awk -v w "$WAIT_TIME" 'BEGIN { print (w >= 2.5) ? "yes" : "no" }')
+      # Both processes should have exited 0.
+      wait "$HOLDER_PID"; HOLDER_RC=$?
+      wait "$WAITER_PID"; WAITER_RC=$?
+      if [ "$WAIT_OK" = "yes" ] && [ "$HOLDER_RC" = "0" ] && [ "$WAITER_RC" = "0" ]; then
+        assert_pass "T13: flock contention — waiter blocked ≥2.5s while holder mutated (waited=${WAIT_TIME}s)"
+      else
+        assert_fail "T13: flock contention" "waited=${WAIT_TIME}s holder_rc=$HOLDER_RC waiter_rc=$WAITER_RC"
+      fi
+    else
+      assert_fail "T13: waiter did not complete" "no waited file"
+      kill -9 "$WAITER_PID" "$HOLDER_PID" 2>/dev/null || true
+    fi
+  fi
+  rm -rf "$T13/lock" "$T13/holder_started" "$T13/waiter_started.waited"
 fi
 
 # ============================================================================

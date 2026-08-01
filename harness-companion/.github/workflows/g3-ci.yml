@@ -1,0 +1,46 @@
+# Phase 3 (Registry & Locking) CI — Linux is the gating platform for the
+# flock-backend contention test (T13). mkdir-backend tests run everywhere.
+name: G3 (Registry & Locking)
+
+on:
+  push:
+    branches: [main, feat/harness-course]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Make scripts executable
+        run: |
+          chmod +x core/lib/*.sh
+          chmod +x core/*.sh
+          chmod +x tests/core/*.sh
+
+      - name: G3 — Lock registry (incl. T13 flock contention)
+        run: bash tests/core/test-lock-registry.sh
+
+      - name: G3 — Feature state machine (52 tests, table-driven)
+        run: bash tests/core/test-harness-feature.sh
+
+      - name: G1 — Run log validation
+        run: bash tests/core/test-validate-run-log.sh
+
+      - name: G1 — Workspace fingerprint
+        run: bash tests/core/test-workspace-fingerprint.sh
+
+      - name: G1 — Passing eligibility
+        run: bash tests/core/test-passing.sh
+
+      - name: G2 — Templates + init + R4 contracts + integration
+        run: |
+          bash tests/core/test-templates.sh
+          bash tests/core/test-init.sh
+          bash tests/core/test-r4-contracts.sh
+          bash tests/core/test-harness-verify-integration.sh

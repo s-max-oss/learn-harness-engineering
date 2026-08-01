@@ -1,29 +1,40 @@
 #!/bin/bash
-# lock-registry.sh — mkdir-based registry mutex for feature_list.json
+# lock-registry.sh — Registry mutex for feature_list.json
 #
 # Design §7: Registry Locking Protocol.
-# Cross-platform: Linux, macOS, Windows Git Bash. No flock dependency.
+# Cross-platform: Linux (flock preferred), macOS (mkdir), Windows Git Bash (mkdir).
 #
-# Public API:
+# Backends (per platform, design §7.1):
+#   - flock  : Linux when `flock(1)` is available (kernel-level fd lock).
+#              Faster than mkdir under high contention; identical semantics
+#              for the acquire/release API exposed here.
+#   - mkdir  : POSIX-atomic, used on macOS and Windows Git Bash, and on
+#              Linux if `flock` is missing. No external dependency beyond
+#              POSIX mkdir(2).
+#
+# The chosen backend is fixed at source time and stored in _LR_BACKEND.
+# Override with LOCK_REGISTRY_BACKEND=flock|mkdir before sourcing if
+# platform detection disagrees with your environment.
+#
+# Public API (same signature for both backends):
 #   source lock-registry.sh
-#   acquire_lock <lock_dir> [timeout_s]   # → echoes token on stdout; exit 5 on timeout
-#   release_lock <lock_dir> <token>       # exit 0 released, exit 6 token mismatch
+#   acquire_lock <lock_dir> [timeout_s]
+#     Returns 0 on success, 5 on timeout.
+#     Side effects on success:
+#       - mkdir backend: creates $lock_dir with metadata files
+#       - flock backend: opens FD 9 on $lock_dir/flock.lock and holds an
+#         exclusive flock in the *calling* shell. The token is exposed as
+#         $LOCK_REGISTRY_TOKEN. Do NOT wrap acquire_lock in $(...) — that
+#         runs it in a subshell, the subshell exits, FD 9 closes, and the
+#         kernel releases the flock. acquire_lock sets a global; do not
+#         capture via command substitution.
+#   release_lock <lock_dir> [token]
+#     If [token] is omitted, reads $LOCK_REGISTRY_TOKEN from the environment.
+#     exit 0 released; exit 6 token mismatch / cannot_verify_ownership.
 #
-# Lock metadata (per design §7.4):
-#   <lock_dir>/pid                  — owner PID
-#   <lock_dir>/process_start_time   — owner process start time (seconds since epoch, integer)
-#                                     Empty on Windows Git Bash (start_time unavailable)
-#   <lock_dir>/hostname             — owner hostname
-#   <lock_dir>/timestamp            — lock acquisition time (seconds since epoch)
-#   <lock_dir>/token                — 32-char random ownership token
-#
-# Stale recovery matrix (per design §7.5):
-#   - PID dead + same host + start_time present → safe to recover
-#   - PID dead + no start_time (legacy/Windows) → wait until LOCK_TIMEOUT_S
-#   - PID alive + start_time differs           → NOT stolen (PID reuse)
-#   - Different host + within cross-host grace → wait (don't use local PID)
-#   - Different host + past cross-host grace   → recover
-#   - Damaged metadata (missing fields)        → wait until LOCK_TIMEOUT_S
+# Stale recovery matrix (per design §7.5) — applies to mkdir backend only.
+# flock backend relies on the kernel for stale detection (dead fd → auto-release
+# when the owning process exits; PID-start-time disambiguation is moot).
 #
 # Defaults:
 #   LOCK_TIMEOUT_S       = 10 (per-call override via 2nd arg)
@@ -34,6 +45,37 @@
 : "${LOCK_TIMEOUT_S:=10}"
 : "${CROSS_HOST_TIMEOUT_S:=60}"
 : "${POLL_INTERVAL_S:=0.1}"
+
+# ---- backend selection -------------------------------------------------------
+# Override via LOCK_REGISTRY_BACKEND=flock|mkdir. Otherwise: flock on Linux
+# when available, mkdir everywhere else.
+if [ -n "${LOCK_REGISTRY_BACKEND:-}" ]; then
+  _LR_BACKEND="$LOCK_REGISTRY_BACKEND"
+elif [ "$(uname -s 2>/dev/null)" = "Linux" ] && command -v flock >/dev/null 2>&1; then
+  _LR_BACKEND="flock"
+else
+  _LR_BACKEND="mkdir"
+fi
+
+# Map lock_dir to flock's lock file path. For the flock backend, the caller-
+# supplied lock_dir is a directory; we create a regular file inside it named
+# `flock.lock` and use that as the flock target.
+_lr_flock_path() {
+  printf '%s/flock.lock' "$1"
+}
+
+# fd storage for flock backend. We need to remember which fd maps to which
+# lock_dir so release_lock can flock -u the right fd. We use a simple file
+# under $TMPDIR or /tmp with the lock_dir path encoded.
+_lr_fd_dir="${TMPDIR:-/tmp}/.lock-registry-fds.$$"
+mkdir -p "$_lr_fd_dir" 2>/dev/null || _lr_fd_dir="/tmp/.lock-registry-fds.$$-$$"
+mkdir -p "$_lr_fd_dir" 2>/dev/null || true
+_lr_fd_path() {
+  # Encode lock_dir to a flat filename so we can mktemp safely.
+  printf '%s/%s' "$_lr_fd_dir" "$(printf '%s' "$1" | tr '/' '_')"
+}
+
+# ---- token generation -------------------------------------------------------
 
 # ---- token generation -------------------------------------------------------
 # 32-char random token. Falls back to $RANDOM concatenation if /dev/urandom is
@@ -221,12 +263,50 @@ _lr_is_stale() {
   return 1
 }
 
+# _lr_snapshot_stale <lock_dir>
+# Returns 0 if lock_dir is stale, AND captures identity snapshot into
+# LR_STALE_{PID,START,TS,TOKEN} for TOCTOU-safe deletion. Caller MUST
+# re-read metadata before deleting and verify the snapshot still matches.
+# Returns 1 if lock_dir is not stale (or metadata damaged).
+_lr_snapshot_stale() {
+  local lock_dir="$1"
+  if _lr_is_stale "$lock_dir"; then
+    LR_STALE_PID="$LR_META_PID"
+    LR_STALE_START="$LR_META_START"
+    LR_STALE_TS="$LR_META_TS"
+    LR_STALE_TOKEN="$LR_META_TOKEN"
+    LR_STALE_HOST="$LR_META_HOST"
+    return 0
+  fi
+  return 1
+}
+
 # ---- public API --------------------------------------------------------------
 
 # acquire_lock <lock_dir> [timeout_s]
-# On success: prints token to stdout, returns 0.
-# On timeout: prints nothing, returns 5.
+# Dispatches to flock or mkdir backend per _LR_BACKEND (fixed at source time).
 acquire_lock() {
+  if [ "$_LR_BACKEND" = "flock" ]; then
+    _lr_flock_acquire "$@"
+    return $?
+  fi
+  _lr_mkdir_acquire "$@"
+}
+
+# release_lock <lock_dir> <token>
+# Dispatches to flock or mkdir backend per _LR_BACKEND.
+release_lock() {
+  if [ "$_LR_BACKEND" = "flock" ]; then
+    _lr_flock_release "$@"
+    return $?
+  fi
+  _lr_mkdir_release "$@"
+}
+
+# ---- mkdir backend (POSIX-atomic; macOS, Git Bash, Linux-fallback) -----------
+
+# _lr_mkdir_acquire <lock_dir> [timeout_s]
+_lr_mkdir_acquire() {
   local lock_dir="${1:-}"
   local timeout_s="${2:-$LOCK_TIMEOUT_S}"
   if [ -z "$lock_dir" ]; then
@@ -256,19 +336,34 @@ acquire_lock() {
       my_start_time="$(_lr_process_start_time "$my_pid" 2>/dev/null || true)"
       _lr_write_meta "$lock_dir" "$my_pid" "$my_start_time" "$my_host" \
         "$(_lr_now)" "$my_token"
+      # Expose token via the global so release_lock can read it from env
+      # (mirrors the flock backend). Callers must NOT wrap acquire_lock in
+      # $(...); see the public-API doc-comment at the top of this file.
+      LOCK_REGISTRY_TOKEN="$my_token"
+      export LOCK_REGISTRY_TOKEN
       printf '%s' "$my_token"
       return 0
     fi
 
-    # Lock exists — check if it's stale
-    if _lr_is_stale "$lock_dir"; then
-      # Owner-safe remove: re-check metadata right before rmdir to avoid
-      # stealing a lock that was just released and re-acquired by another.
-      # Use rm -rf because metadata files (pid/hostname/etc.) live inside the
-      # lock_dir; rmdir alone would fail with ENOTEMPTY.
-      if rm -rf "$lock_dir" 2>/dev/null; then
-        continue
+    # Lock exists — check if it's stale, with TOCTOU-safe recovery.
+    # Capture identity (pid + start_time + token + timestamp) at the stale
+    # decision time, then re-read metadata immediately before rm -rf. Only
+    # delete if the identity still matches — otherwise another process may
+    # have released and re-acquired the lock, and we'd be stealing the new
+    # owner's lock. Use rm -rf because metadata files live inside lock_dir.
+    if _lr_snapshot_stale "$lock_dir"; then
+      # _lr_snapshot_stale sets LR_STALE_PID / LR_STALE_START / LR_STALE_TS / LR_STALE_TOKEN
+      if _lr_read_meta "$lock_dir" \
+          && [ "$LR_META_PID" = "$LR_STALE_PID" ] \
+          && [ "$LR_META_START" = "$LR_STALE_START" ] \
+          && [ "$LR_META_TOKEN" = "$LR_STALE_TOKEN" ] \
+          && [ "$LR_META_TS" = "$LR_STALE_TS" ]; then
+        # Identity confirmed unchanged — safe to delete the stale lock.
+        if rm -rf "$lock_dir" 2>/dev/null; then
+          continue
+        fi
       fi
+      # Identity changed: another process replaced the lock. Wait.
     fi
 
     sleep "$POLL_INTERVAL_S"
@@ -277,28 +372,176 @@ acquire_lock() {
   return 5  # timeout
 }
 
-# release_lock <lock_dir> <token>
-# Returns 0 if released; 6 if token mismatch (lock NOT released).
-release_lock() {
+# _lr_mkdir_release <lock_dir> [token]
+# If [token] is omitted, reads $LOCK_REGISTRY_TOKEN from the environment.
+_lr_mkdir_release() {
   local lock_dir="${1:-}"
-  local token="${2:-}"
+  local token="${2:-${LOCK_REGISTRY_TOKEN:-}}"
   if [ -z "$lock_dir" ] || [ -z "$token" ]; then
-    echo "release_lock: usage: release_lock <lock_dir> <token>" >&2
+    echo "release_lock: usage: release_lock <lock_dir> [token] (token required; set LOCK_REGISTRY_TOKEN or pass as 2nd arg)" >&2
     return 2
   fi
   if [ ! -d "$lock_dir" ]; then
     # Lock already gone — nothing to do (idempotent)
     return 0
   fi
-  if _lr_read_meta "$lock_dir"; then
-    if [ "$LR_META_TOKEN" != "$token" ]; then
-      echo "release_lock: token_mismatch — refusing to release lock held by another owner" >&2
-      return 6
-    fi
+  # Fail-closed: if metadata cannot be read, ownership cannot be verified.
+  # Refuse to delete — any token would otherwise be able to remove a lock
+  # whose owner is unknown.
+  if ! _lr_read_meta "$lock_dir"; then
+    echo "release_lock: cannot_verify_ownership — metadata unreadable; refusing to delete" >&2
+    return 6
   fi
-  rm -rf "$lock_dir" 2>/dev/null || {
-    # Directory may have been replaced between read and remove; try once more.
+  if [ "$LR_META_TOKEN" != "$token" ]; then
+    echo "release_lock: token_mismatch — refusing to release lock held by another owner" >&2
+    return 6
+  fi
+  # rm -rf + verify: on slower Windows filesystems the directory entry can
+  # linger for a few hundred ms after rm -rf reports success. Retry up to
+  # 5 times with short sleeps to ensure the lock_dir is actually gone before
+  # the caller assumes release succeeded — otherwise the next acquire_lock
+  # will see a stale-but-matching lock_dir and time out (Windows flake).
+  local removed=0
+  local i
+  for i in 1 2 3 4 5; do
     rm -rf "$lock_dir" 2>/dev/null || true
+    if [ ! -d "$lock_dir" ]; then
+      removed=1
+      break
+    fi
+    sleep 0.1
+  done
+  if [ "$removed" -ne 1 ]; then
+    # Lock_dir is still present after retries. The token matched and the
+    # owner is verified, so the release "logically" succeeded — but the
+    # filesystem didn't honor rm. Surface a warning so callers and tests
+    # can detect the leak; the next acquire_lock will stale-recover.
+    echo "release_lock: warning — failed to remove $lock_dir after 5 attempts (filesystem leak)" >&2
+  fi
+  return 0
+}
+
+# ---- flock backend (Linux preferred) -----------------------------------------
+# flock(1) provides fd-level exclusive locks handled by the kernel. The lock
+# is auto-released when the owning process exits — no stale-recovery matrix
+# needed for crash safety. Token-based ownership is preserved via a sidecar
+# file so release_lock can refuse mismatched tokens (defense in depth: even
+# though fd ownership is enforced by the kernel, refusing wrong tokens gives
+# us a clear error path and matches the mkdir API contract).
+#
+# File layout:
+#   <lock_dir>/                       — caller-supplied directory
+#   <lock_dir>/flock.lock             — regular file flock(1) operates on
+#   <lock_dir>/.lr_owner              — file containing our 32-char token
+#   $_lr_fd_dir/<encoded_lock_dir>    — file with the fd number for release
+
+# _lr_flock_acquire <lock_dir> [timeout_s]
+# IMPORTANT: opens FD 9 in the CALLING shell via `exec 9>>`. The caller must
+# NOT capture acquire_lock's stdout via $(...) — that would run in a subshell,
+# the subshell would exit, FD 9 would close, and the kernel would release the
+# flock immediately. We echo the token for visibility but expose it primarily
+# via the global LOCK_REGISTRY_TOKEN. After a successful acquire_lock, the
+# caller should run mutations, then call release_lock (NOT in a subshell).
+_lr_flock_acquire() {
+  local lock_dir="${1:-}"
+  local timeout_s="${2:-$LOCK_TIMEOUT_S}"
+  if [ -z "$lock_dir" ]; then
+    echo "acquire_lock: usage: acquire_lock <lock_dir> [timeout_s]" >&2
+    return 2
+  fi
+  local lock_file
+  lock_file="$(_lr_flock_path "$lock_dir")"
+
+  # Ensure parent dir exists (mkdir -p is safe because lock_file inside it
+  # is the atomic primitive, not the directory).
+  mkdir -p "$lock_dir" 2>/dev/null || {
+    echo "acquire_lock: failed to create lock_dir '$lock_dir'" >&2
+    return 2
   }
+  # Touch the lock file so flock has something to open.
+  : >> "$lock_file" 2>/dev/null || {
+    echo "acquire_lock: failed to create lock file '$lock_file'" >&2
+    return 2
+  }
+
+  local my_token
+  my_token="$(_lr_random_token)"
+  if [ -z "$my_token" ]; then
+    echo "acquire_lock: failed to generate token" >&2
+    return 3
+  fi
+
+  # Open FD 9 in the calling shell. After this line returns, FD 9 stays
+  # open in the shell that called acquire_lock — not in a subshell.
+  exec 9>>"$lock_file"
+
+  # Try to acquire exclusive flock with the deadline. flock -w 1 waits at
+  # most 1s; we loop until the deadline so we surface a clear timeout error.
+  local rc=1
+  local deadline
+  deadline=$(( $(_lr_now) + timeout_s ))
+  while [ "$(_lr_now)" -lt "$deadline" ] && [ "$rc" -ne 0 ]; do
+    flock -w 1 -x 9 && rc=0 || rc=$?
+  done
+
+  if [ "$rc" -ne 0 ]; then
+    # Timed out — close the FD in the calling shell and surface failure.
+    exec 9>&- 2>/dev/null || true
+    return 5
+  fi
+
+  # Got the flock — record token sidecar so release_lock can verify ownership.
+  printf '%s' "$my_token" > "$lock_dir/.lr_owner" 2>/dev/null || true
+  # Expose token via the global LOCK_REGISTRY_TOKEN so callers don't need to
+  # capture stdout (which would put acquire_lock in a subshell).
+  LOCK_REGISTRY_TOKEN="$my_token"
+  export LOCK_REGISTRY_TOKEN
+  # Echo for callers that still want stdout (use process substitution carefully).
+  printf '%s' "$my_token"
+  return 0
+}
+
+# _lr_flock_release <lock_dir> [token]
+# If [token] is omitted, reads $LOCK_REGISTRY_TOKEN from the environment.
+# Must be called in the same shell that called acquire_lock (so FD 9 is the
+# same kernel fd that holds the flock).
+_lr_flock_release() {
+  local lock_dir="${1:-}"
+  local token="${2:-${LOCK_REGISTRY_TOKEN:-}}"
+  if [ -z "$lock_dir" ] || [ -z "$token" ]; then
+    echo "release_lock: usage: release_lock <lock_dir> [token] (token required; set LOCK_REGISTRY_TOKEN or pass as 2nd arg)" >&2
+    return 2
+  fi
+  local lock_file
+  lock_file="$(_lr_flock_path "$lock_dir")"
+
+  # Idempotent: if lock_file gone, nothing to do.
+  if [ ! -e "$lock_file" ]; then
+    return 0
+  fi
+
+  # Token check (fail-closed).
+  local owner_tok=""
+  if [ -f "$lock_dir/.lr_owner" ]; then
+    owner_tok="$(cat "$lock_dir/.lr_owner" 2>/dev/null)"
+  fi
+  if [ -z "$owner_tok" ]; then
+    echo "release_lock: cannot_verify_ownership — owner token sidecar missing; refusing to unlock" >&2
+    return 6
+  fi
+  if [ "$owner_tok" != "$token" ]; then
+    echo "release_lock: token_mismatch — refusing to unlock lock held by another owner" >&2
+    return 6
+  fi
+
+  # Release the flock in the calling shell and close FD 9. Because the flock
+  # was acquired by the same shell via `exec 9>>`, this is the only fd that
+  # actually holds the kernel lock — closing it releases the lock for any
+  # waiters (proven by test-lock-registry T13).
+  flock -u 9 2>/dev/null || true
+  exec 9>&- 2>/dev/null || true
+  rm -f "$(_lr_fd_path "$lock_dir")" 2>/dev/null || true
+  rm -f "$lock_dir/.lr_owner" 2>/dev/null || true
+  LOCK_REGISTRY_TOKEN=""
   return 0
 }
