@@ -35,7 +35,7 @@ First release candidate after the Phase 4 (Claude Code adapter) and Phase 5b
 
 ### Added — Phase 5b: Codex CLI adapter
 
-- `.codex-plugin/plugin.json` — Codex marketplace manifest (semver 2.0.0)
+- `.codex-plugin/plugin.json` — Codex marketplace manifest (version 2.0.0-rc.1; semver prerelease)
 - `.codex-plugin/skills/SKILL.md` — Codex skill definition
 - `hooks/hooks.json` — Codex event-keyed hook registry
 - `adapters/codex/` — host protocol mapping (Codex)
@@ -94,4 +94,4 @@ Tested on Windows (real `cmd.exe` invocation across three runtime scenarios:
 
 The pre-Phase-4 single-file layout (`scripts/harness-*.sh`) shipped
 under 1.1.x. v1.1.2 callers can keep using the old `scripts/` paths via
-the v1 compat wrappers in 2.0.0.
+the v1 compat wrappers in 2.0.0-rc.1.

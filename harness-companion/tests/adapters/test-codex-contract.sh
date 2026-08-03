@@ -130,9 +130,10 @@ if [ -f "$PLUGIN_JSON" ]; then
   PLUGIN_NAME="$(_py_get "$PLUGIN_JSON" "name")"
   assert_eq "G5.1a plugin.json has name=harness-companion" "harness-companion" "$PLUGIN_NAME"
 
-  # G5.1b: plugin.json has real version (semver)
+  # G5.1b: plugin.json has real version (semver, including prerelease/build)
+  # Per semver.org: MAJOR.MINOR.PATCH(-PRERELEASE)?(+BUILD)?
   PLUGIN_VER="$(_py_get "$PLUGIN_JSON" "version")"
-  if echo "$PLUGIN_VER" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  if echo "$PLUGIN_VER" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
     assert_pass "G5.1b plugin.json version is semver ($PLUGIN_VER)"
   else
     assert_fail "G5.1b plugin.json version is semver" "got=$PLUGIN_VER"
