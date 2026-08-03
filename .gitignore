@@ -28,3 +28,4 @@ docs/.vitepress/dist/
 *.tsbuildinfo
 artifacts/
 dist/
+.superpowers/
